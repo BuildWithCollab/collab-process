@@ -2,11 +2,12 @@
 
 #include <chrono>
 #include <filesystem>
-#include <functional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "collab/process/compat.hpp"
 
 namespace collab::process {
 
@@ -44,8 +45,8 @@ struct CommandConfig {
 };
 
 struct IoCallbacks {
-    std::move_only_function<void(std::string_view)> on_stdout;
-    std::move_only_function<void(std::string_view)> on_stderr;
+    collab::process::move_only_function<void(std::string_view)> on_stdout;
+    collab::process::move_only_function<void(std::string_view)> on_stderr;
 };
 
 }  // namespace collab::process

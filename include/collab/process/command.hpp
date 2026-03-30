@@ -117,7 +117,7 @@ public:
     }
 
     auto stdout_callback(this auto&& self,
-        std::move_only_function<void(std::string_view)> cb) -> decltype(auto) {
+        collab::process::move_only_function<void(std::string_view)> cb) -> decltype(auto) {
         self.callbacks_.on_stdout = std::move(cb);
         return std::forward<decltype(self)>(self);
     }
@@ -145,7 +145,7 @@ public:
     }
 
     auto stderr_callback(this auto&& self,
-        std::move_only_function<void(std::string_view)> cb) -> decltype(auto) {
+        collab::process::move_only_function<void(std::string_view)> cb) -> decltype(auto) {
         self.callbacks_.on_stderr = std::move(cb);
         return std::forward<decltype(self)>(self);
     }

@@ -24,8 +24,8 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     HANDLE stderr_read = nullptr;
 
     // Callbacks
-    std::move_only_function<void(std::string_view)> on_stdout;
-    std::move_only_function<void(std::string_view)> on_stderr;
+    collab::process::move_only_function<void(std::string_view)> on_stdout;
+    collab::process::move_only_function<void(std::string_view)> on_stderr;
 
     // Captured output (populated by wait)
     std::string stdout_content;
@@ -51,7 +51,7 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     void read_pipes() {
         // Read stdout
         auto read_handle = [](HANDLE h, std::string& out,
-                              std::move_only_function<void(std::string_view)>& cb) {
+                              collab::process::move_only_function<void(std::string_view)>& cb) {
             if (!h) return;
             char buf[4096];
             DWORD bytes_read;

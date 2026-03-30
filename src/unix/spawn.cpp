@@ -16,8 +16,8 @@ struct UnixProcessImpl : RunningProcess::Impl {
     int stdout_fd = -1;
     int stderr_fd = -1;
 
-    std::move_only_function<void(std::string_view)> on_stdout;
-    std::move_only_function<void(std::string_view)> on_stderr;
+    collab::process::move_only_function<void(std::string_view)> on_stdout;
+    collab::process::move_only_function<void(std::string_view)> on_stderr;
 
     std::string stdout_content;
     std::string stderr_content;
@@ -38,7 +38,7 @@ struct UnixProcessImpl : RunningProcess::Impl {
 
     void read_pipes() {
         auto read_fd = [](int fd, std::string& out,
-                          std::move_only_function<void(std::string_view)>& cb) {
+                          collab::process::move_only_function<void(std::string_view)>& cb) {
             if (fd < 0) return;
             char buf[4096];
             ssize_t n;
@@ -211,7 +211,7 @@ auto platform_spawn(SpawnParams params)
 
         // Working directory
         if (!params.working_dir.empty())
-            chdir(params.working_dir.c_str());
+            (void)chdir(params.working_dir.c_str());
 
         // Environment
         for (auto& entry : params.env_entries) {
@@ -246,7 +246,7 @@ auto platform_spawn(SpawnParams params)
     // Write stdin content in a thread to avoid deadlock
     if (stdin_pipe[1] >= 0 && !params.stdin_content.empty()) {
         std::thread([content = std::move(params.stdin_content), fd = stdin_pipe[1]] {
-            write(fd, content.data(), content.size());
+            (void)::write(fd, content.data(), content.size());
             close(fd);
         }).detach();
     } else if (stdin_pipe[1] >= 0) {

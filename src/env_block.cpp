@@ -6,6 +6,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+extern "C" char** environ;
 #endif
 
 namespace collab::process::detail {
@@ -27,8 +30,7 @@ auto build_env_block(const CommandConfig& config) -> std::vector<std::string> {
             FreeEnvironmentStringsA(env_strings);
         }
 #else
-        extern char** environ;
-        for (char** e = environ; *e; ++e) {
+        for (char** e = ::environ; *e; ++e) {
             entries.emplace_back(*e);
         }
 #endif

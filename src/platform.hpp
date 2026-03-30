@@ -1,5 +1,6 @@
 #pragma once
 
+#include "collab/process/compat.hpp"
 #include "collab/process/command_config.hpp"
 #include "collab/process/result.hpp"
 #include "collab/process/running_process.hpp"
@@ -37,8 +38,8 @@ struct SpawnParams {
     bool needs_cmd_wrapper = false;  // Windows: resolved target is not a PE
 
     // Callbacks (moved in, not copied)
-    std::move_only_function<void(std::string_view)> on_stdout;
-    std::move_only_function<void(std::string_view)> on_stderr;
+    collab::process::move_only_function<void(std::string_view)> on_stdout;
+    collab::process::move_only_function<void(std::string_view)> on_stderr;
 };
 
 // Platform implementations — one in win32/, one in unix/
