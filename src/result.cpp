@@ -1,24 +1,23 @@
 #include "collab/process/result.hpp"
 
-#include <string>
+#include <fmt/format.h>
 
 namespace collab::process {
 
 auto SpawnError::what() const -> std::string {
-    auto code = std::to_string(native_error);
     switch (kind) {
         case command_not_found:
-            return "command not found (native error: " + code + ")";
+            return fmt::format("command not found (native error: {})", native_error);
         case permission_denied:
-            return "permission denied (native error: " + code + ")";
+            return fmt::format("permission denied (native error: {})", native_error);
         case pipe_creation_failed:
-            return "pipe creation failed (native error: " + code + ")";
+            return fmt::format("pipe creation failed (native error: {})", native_error);
         case invalid_working_directory:
-            return "invalid working directory (native error: " + code + ")";
+            return fmt::format("invalid working directory (native error: {})", native_error);
         case platform_error:
-            return "platform error: " + code;
+            return fmt::format("platform error: {}", native_error);
     }
-    return "unknown error: " + code;
+    return fmt::format("unknown error: {}", native_error);
 }
 
 }  // namespace collab::process

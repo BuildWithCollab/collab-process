@@ -2,10 +2,10 @@
 
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <random>
-#include <sstream>
 #include <string>
+
+#include <fmt/format.h>
 
 namespace fs = std::filesystem;
 
@@ -17,10 +17,7 @@ auto write_temp_file(std::string_view content, std::string_view prefix)
     static thread_local std::mt19937 rng{std::random_device{}()};
     std::uniform_int_distribution<unsigned> dist(0, 0xFFFFFF);
 
-    std::ostringstream suffix;
-    suffix << std::hex << std::setfill('0') << std::setw(6) << dist(rng);
-
-    auto filename = std::string("collab_") + std::string(prefix) + "_" + suffix.str() + ".txt";
+    auto filename = fmt::format("collab_{}_{:06x}.txt", prefix, dist(rng));
     auto path = fs::temp_directory_path() / filename;
 
     std::ofstream f(path, std::ios::binary);

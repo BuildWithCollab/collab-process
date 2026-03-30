@@ -4,6 +4,8 @@ add_rules("mode.release")
 set_defaultmode("release")
 set_languages("c++23")
 
+add_requires("fmt")
+
 option("build_tests")
     set_default(true)
     set_showmenu(true)
@@ -18,6 +20,7 @@ target("collab-process")
     set_kind("static")
     add_headerfiles("include/(**.hpp)")
     add_includedirs("include", { public = true })
+    add_packages("fmt", { public = true })
 
     -- Shared source files
     add_files("src/*.cpp")
