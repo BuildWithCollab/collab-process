@@ -1,0 +1,84 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # daily at 6am UTC
+  workflow_dispatch: {}    # manual trigger
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  smoke-test:
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+          - os: ubuntu-latest
+            toolchain: gcc-14
+          - os: macos-latest
+            toolchain: llvm
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@cc0f56c35b75d0975ed5d9e29005fae707721cd5 # v1
+
+      - name: Install GCC 14 (Linux)
+        if: matrix.toolchain == 'gcc-14'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+
+      - name: Install LLVM/Clang (macOS)
+        if: matrix.toolchain == 'llvm'
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+
+      # Copy smoke/ out of the repo tree so xmake doesn't find the root xmake.lua
+      - name: Isolate smoke test
+        shell: bash
+        run: cp -r smoke /tmp/smoke-test
+
+      - name: Configure (Linux GCC 14)
+        if: matrix.toolchain == 'gcc-14'
+        run: cd /tmp/smoke-test && xmake config --toolchain=gcc -y
+
+      - name: Configure (macOS LLVM)
+        if: matrix.toolchain == 'llvm'
+        run: cd /tmp/smoke-test && xmake config --toolchain=llvm --sdk="$(brew --prefix llvm)" -y
+
+      - name: Configure (Windows)
+        if: matrix.toolchain == ''
+        run: cd /tmp/smoke-test && xmake config -y
+        shell: bash
+
+      - name: Build smoke test
+        run: cd /tmp/smoke-test && xmake build
+        shell: bash
+
+      - name: Run smoke test
+        run: cd /tmp/smoke-test && xmake run smoke-test
+        shell: bash
+
+      - name: Notify Slack on Failure
+        if: failure()
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_GHA_FAILURES_CHANNEL_ID }}
+            text: "🌙 *Nightly smoke test failed* — *${{ github.repository }}* on *${{ matrix.os }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"
