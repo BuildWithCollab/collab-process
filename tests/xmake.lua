@@ -17,6 +17,9 @@ target("collab-process-tests")
     end
 
     -- Pass the build output dir so tests can find test_helper
-    add_defines('TEST_BUILD_DIR="$(builddir)/$(plat)/$(arch)/$(mode)"')
+    on_load(function (target)
+        local builddir = path.join(target:targetdir())
+        target:add("defines", 'TEST_BUILD_DIR="' .. builddir:gsub("\\", "/") .. '"')
+    end)
 
     add_tests("default")
