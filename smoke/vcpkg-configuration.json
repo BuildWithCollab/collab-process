@@ -1,0 +1,15 @@
+{
+    "default-registry": {
+        "kind": "git",
+        "repository": "https://github.com/microsoft/vcpkg.git",
+        "baseline": "4af038c8a39b5873aa2f89c5dec0d5cd021a5112"
+    },
+    "registries": [
+        {
+            "kind": "git",
+            "repository": "https://github.com/BuildWithCollab/Packages.git",
+            "baseline": "901b58bf0ac8b1ff7f87796dcb05895c8a0888ca",
+            "packages": ["collab-core", "collab-process"]
+        }
+    ]
+}

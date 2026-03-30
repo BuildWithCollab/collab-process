@@ -12,7 +12,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  smoke-test:
+  # ── xmake smoke test ──────────────────────────────────────────────
+  xmake-smoke:
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -81,4 +82,61 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             channel: ${{ secrets.SLACK_GHA_FAILURES_CHANNEL_ID }}
-            text: "🌙 *Nightly smoke test failed* — *${{ github.repository }}* on *${{ matrix.os }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"
+            text: "🌙 *Nightly xmake smoke failed* — *${{ github.repository }}* on *${{ matrix.os }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"
+
+  # ── vcpkg smoke test ──────────────────────────────────────────────
+  vcpkg-smoke:
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Copy smoke/ to /tmp so it's isolated
+      - name: Isolate smoke test
+        shell: bash
+        run: cp -r smoke /tmp/smoke-test
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /tmp/vcpkg
+          vcpkgJsonGlob: /tmp/smoke-test/vcpkg.json
+
+      - name: Configure with CMake
+        shell: bash
+        run: |
+          cmake -B /tmp/smoke-test/build -S /tmp/smoke-test \
+            -DCMAKE_TOOLCHAIN_FILE=/tmp/vcpkg/scripts/buildsystems/vcpkg.cmake \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: bash
+        run: cmake --build /tmp/smoke-test/build --config Release
+
+      - name: Run smoke test
+        shell: bash
+        run: |
+          if [ -f /tmp/smoke-test/build/smoke-test ]; then
+            /tmp/smoke-test/build/smoke-test
+          elif [ -f /tmp/smoke-test/build/Release/smoke-test.exe ]; then
+            /tmp/smoke-test/build/Release/smoke-test.exe
+          else
+            find /tmp/smoke-test/build -name "smoke-test*" -type f | head -1 | xargs -I{} "{}"
+          fi
+
+      - name: Notify Slack on Failure
+        if: failure()
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_GHA_FAILURES_CHANNEL_ID }}
+            text: "🌙 *Nightly vcpkg smoke failed* — *${{ github.repository }}* on *${{ matrix.os }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"

@@ -1,0 +1,8 @@
+{
+    "name": "collab-process-smoke",
+    "version-string": "0.0.1",
+    "dependencies": [
+        "collab-process",
+        "catch2"
+    ]
+}
