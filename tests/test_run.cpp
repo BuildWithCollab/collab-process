@@ -48,9 +48,11 @@ TEST_CASE("run: stdout is empty when mode is discard", "[run]") {
     config.program = helper_path();
     config.args = {"echo", "should not appear"};
     config.stdout_mode = CommandConfig::OutputMode::discard;
+    config.stderr_mode = CommandConfig::OutputMode::discard;
 
     auto result = collab::process::run(config);
     REQUIRE(result.has_value());
+    INFO("stdout_content was: [" << result->stdout_content << "]");
     CHECK(result->stdout_content.empty());
 }
 
