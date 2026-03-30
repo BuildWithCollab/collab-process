@@ -55,4 +55,4 @@ jobs:
         run: xmake -y
 
       - name: Test
-        run: xmake test -y
+        run: xmake run collab-process-tests
