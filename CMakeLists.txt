@@ -4,6 +4,8 @@ project(collab-process LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include(CMakePackageConfigHelpers)
+
 find_package(fmt CONFIG REQUIRED)
 find_package(collab-core CONFIG REQUIRED)
 
@@ -40,7 +42,16 @@ target_link_libraries(collab-process PUBLIC fmt::fmt collab::collab-core)
 install(TARGETS collab-process EXPORT collab-process-targets ARCHIVE DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
 install(EXPORT collab-process-targets
-    FILE collab-process-config.cmake
+    FILE collab-process-targets.cmake
     NAMESPACE collab::
+    DESTINATION share/collab-process
+)
+
+configure_package_config_file(
+    cmake/collab-process-config.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/collab-process-config.cmake"
+    INSTALL_DESTINATION share/collab-process
+)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/collab-process-config.cmake"
     DESTINATION share/collab-process
 )

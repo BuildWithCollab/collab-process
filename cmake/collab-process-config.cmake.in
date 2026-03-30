@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(fmt CONFIG)
+find_dependency(collab-core CONFIG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/collab-process-targets.cmake")
