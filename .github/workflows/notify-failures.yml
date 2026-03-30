@@ -1,4 +1,4 @@
-name: Notify Failures
+name: Main
 
 on:
   push:

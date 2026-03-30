@@ -1,12 +1,6 @@
-name: CI
+name: PR
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - '.claude/**'
   pull_request:
     branches: [main]
     paths-ignore:

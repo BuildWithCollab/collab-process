@@ -4,6 +4,15 @@ add_rules("mode.release")
 set_defaultmode("release")
 set_languages("c++23")
 
+includes("xmake/collab.lua")
+
+-- BuildWithCollab package registry
+add_repositories("BuildWithCollab https://github.com/BuildWithCollab/Packages.git")
+
+-- Collab dependencies (local or registry, depending on env vars)
+add_collab_requires("collab-core")
+
+-- External dependencies
 add_requires("fmt")
 
 option("build_tests")
@@ -21,6 +30,7 @@ target("collab-process")
     add_headerfiles("include/(**.hpp)")
     add_includedirs("include", { public = true })
     add_packages("fmt", { public = true })
+    add_collab_packages("collab-core")
 
     -- Shared source files
     add_files("src/*.cpp")
