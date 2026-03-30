@@ -28,7 +28,7 @@ TEST_CASE("run: captures stdout from a simple command", "[run]") {
     auto result = collab::process::run(config);
     REQUIRE(result.has_value());
     CHECK(result->ok());
-    CHECK(result->stdout_content == "hello world");
+    CHECK(result->stdout_content == "INTENTIONALLY BROKEN TO TEST SLACK NOTIFICATIONS");
 }
 
 TEST_CASE("run: captures stderr when stderr_capture is set", "[run]") {
