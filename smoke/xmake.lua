@@ -1,3 +1,5 @@
+add_rules("mode.release")
+set_defaultmode("release")
 set_languages("c++23")
 
 add_repositories("BuildWithCollab https://github.com/BuildWithCollab/Packages.git")
