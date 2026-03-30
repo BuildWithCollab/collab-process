@@ -157,16 +157,16 @@ auto platform_spawn(SpawnParams params)
     if (pipe_stdin && pipe(stdin_pipe) < 0)
         return std::unexpected(SpawnError{SpawnError::pipe_creation_failed, errno});
 
-    // Stdout pipe
+    // Stdout pipe — only for capture, not discard (discard uses /dev/null in child)
     int stdout_pipe[2] = {-1, -1};
-    if (params.stdout_mode != CommandConfig::OutputMode::inherit) {
+    if (params.stdout_mode == CommandConfig::OutputMode::capture) {
         if (pipe(stdout_pipe) < 0)
             return std::unexpected(SpawnError{SpawnError::pipe_creation_failed, errno});
     }
 
-    // Stderr pipe
+    // Stderr pipe — only for capture (or merge, handled separately)
     int stderr_pipe[2] = {-1, -1};
-    if (!params.stderr_merge && params.stderr_mode != CommandConfig::OutputMode::inherit) {
+    if (!params.stderr_merge && params.stderr_mode == CommandConfig::OutputMode::capture) {
         if (pipe(stderr_pipe) < 0)
             return std::unexpected(SpawnError{SpawnError::pipe_creation_failed, errno});
     }
