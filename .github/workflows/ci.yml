@@ -11,7 +11,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            toolchain: msvc
+          - os: ubuntu-latest
+            toolchain: gcc-14
+          - os: macos-latest
+            toolchain: llvm
 
     runs-on: ${{ matrix.os }}
 
@@ -22,6 +28,28 @@ jobs:
         uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
+
+      - name: Install GCC 14 (Linux)
+        if: matrix.toolchain == 'gcc-14'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+
+      - name: Install LLVM/Clang (macOS)
+        if: matrix.toolchain == 'llvm'
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+
+      - name: Configure (Linux GCC 14)
+        if: matrix.toolchain == 'gcc-14'
+        run: xmake f --toolchain=gcc -y
+
+      - name: Configure (macOS LLVM)
+        if: matrix.toolchain == 'llvm'
+        run: xmake f --toolchain=llvm --sdk="$(brew --prefix llvm)" -y
 
       - name: Build
         run: xmake -y
