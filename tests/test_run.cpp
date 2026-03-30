@@ -7,21 +7,27 @@
 namespace fs = std::filesystem;
 using namespace collab::process;
 
-// Path to the test_helper binary — lives in the same directory as this test binary.
-// We use find_executable as a fallback but prefer the build output directory.
+// Path to the test_helper binary — lives in the same build output dir as this test.
 static auto helper_path() -> std::string {
-    // xmake builds all binaries to the same output dir
-    // Try common locations relative to CWD
-    for (auto& candidate : {
-        "test_helper.exe",
-        "build/windows/x64/release/test_helper.exe",
-        "build/windows/x64/debug/test_helper.exe",
-        "./test_helper",
+    // xmake puts all binaries in the same output directory.
+    // Scan common build output patterns across platforms.
+    std::vector<std::string> candidates;
+    for (auto& dir : std::initializer_list<const char*>{
+        "build/windows/x64/release",
+        "build/windows/x64/debug",
+        "build/linux/x86_64/release",
+        "build/linux/x86_64/debug",
+        "build/macosx/arm64/release",
+        "build/macosx/arm64/debug",
+        "build/macosx/x86_64/release",
+        ".",
     }) {
-        if (fs::exists(candidate))
-            return fs::absolute(candidate).string();
+        for (auto& name : {"test_helper.exe", "test_helper"}) {
+            auto p = fs::path(dir) / name;
+            if (fs::exists(p))
+                return fs::absolute(p).string();
+        }
     }
-    // Last resort — hope it's on PATH
     return "test_helper";
 }
 
