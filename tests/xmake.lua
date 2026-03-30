@@ -6,6 +6,7 @@ target("test_helper")
 -- Main test binary
 target("collab-process-tests")
     set_kind("binary")
+    set_rundir("$(projectdir)")
     add_deps("collab-process", "test_helper")
     add_packages("catch2")
     add_files("test_run.cpp")
@@ -15,4 +16,7 @@ target("collab-process-tests")
         -- add_files("test_win32.cpp")  -- uncomment when ready
     end
 
-    add_tests("default", { runargs = {} })
+    -- Pass the build output dir so tests can find test_helper
+    add_defines('TEST_BUILD_DIR="$(builddir)/$(plat)/$(arch)/$(mode)"')
+
+    add_tests("default")

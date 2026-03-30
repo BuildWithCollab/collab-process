@@ -7,28 +7,15 @@
 namespace fs = std::filesystem;
 using namespace collab::process;
 
-// Path to the test_helper binary — lives in the same build output dir as this test.
+// test_helper lives in the xmake build output directory.
+// TEST_BUILD_DIR is passed as a define from xmake.lua.
 static auto helper_path() -> std::string {
-    // xmake puts all binaries in the same output directory.
-    // Scan common build output patterns across platforms.
-    std::vector<std::string> candidates;
-    for (auto& dir : std::initializer_list<const char*>{
-        "build/windows/x64/release",
-        "build/windows/x64/debug",
-        "build/linux/x86_64/release",
-        "build/linux/x86_64/debug",
-        "build/macosx/arm64/release",
-        "build/macosx/arm64/debug",
-        "build/macosx/x86_64/release",
-        ".",
-    }) {
-        for (auto& name : {"test_helper.exe", "test_helper"}) {
-            auto p = fs::path(dir) / name;
-            if (fs::exists(p))
-                return fs::absolute(p).string();
-        }
-    }
-    return "test_helper";
+    auto dir = fs::path(TEST_BUILD_DIR);
+#ifdef _WIN32
+    return (dir / "test_helper.exe").string();
+#else
+    return (dir / "test_helper").string();
+#endif
 }
 
 TEST_CASE("run: captures stdout from a simple command", "[run]") {
