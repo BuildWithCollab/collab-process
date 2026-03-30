@@ -8,7 +8,7 @@
         {
             "kind": "git",
             "repository": "https://github.com/BuildWithCollab/Packages.git",
-            "baseline": "901b58bf0ac8b1ff7f87796dcb05895c8a0888ca",
+            "baseline": "12a9457825d99fb7285889b8134c3272370536f6",
             "packages": ["collab-core", "collab-process"]
         }
     ]
