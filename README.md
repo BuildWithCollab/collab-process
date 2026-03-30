@@ -1,6 +1,6 @@
 # collab-process ▶️🖥️
 
-A C++23 process library. Spawn processes, capture output, manage lifecycles — without `cmd /c` prayers, 8-parameter functions, or `#ifdef` nightmares.
+A C++23 process library. Spawn processes, capture output, manage lifecycles.
 
 ## Table of Contents
 
