@@ -54,31 +54,24 @@ TEST_CASE("process_ref: is_alive() returns false for a bogus PID", "[process_ref
 
 // ── kill ───────────────────────────────────────────────────────
 
-TEST_CASE("process_ref: kill() terminates a running process", "[process_ref]") {
-    int pid;
-    {
-        CommandConfig config;
-        config.program = helper_path();
-        config.args = {"sleep", "30"};
-        config.stdout_mode = CommandConfig::OutputMode::discard;
-        config.stderr_mode = CommandConfig::OutputMode::discard;
+TEST_CASE("process_ref: kill() sends kill signal to a running process", "[process_ref]") {
+    CommandConfig config;
+    config.program = helper_path();
+    config.args = {"sleep", "30"};
+    config.stdout_mode = CommandConfig::OutputMode::discard;
+    config.stderr_mode = CommandConfig::OutputMode::discard;
 
-        auto proc = collab::process::spawn(config);
-        REQUIRE(proc.has_value());
-        pid = proc->pid();
+    auto proc = collab::process::spawn(config);
+    REQUIRE(proc.has_value());
 
-        // Detach so the RunningProcess destructor doesn't kill it —
-        // we want ProcessRef to do the killing
-        std::move(*proc).detach();
-    }
-
+    auto pid = proc->pid();
     ProcessRef ref(pid);
     CHECK(ref.is_alive());
     CHECK(ref.kill());
 
-    // Wait for the process to actually die — CI runners can be slow
-    for (int i = 0; i < 20 && ref.is_alive(); ++i)
-        std::this_thread::sleep_for(200ms);
+    // The RunningProcess owns the child — let it reap the zombie.
+    // ProcessRef::kill() sends the signal, RunningProcess::wait() reaps.
+    auto result = proc->wait();
     CHECK_FALSE(ref.is_alive());
 }
 
