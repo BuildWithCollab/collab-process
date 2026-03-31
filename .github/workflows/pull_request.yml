@@ -1,10 +1,11 @@
-name: PR
+name: Pull Request
 
 on:
   pull_request:
     branches: [main]
     paths-ignore:
       - '**/*.md'
+      - '**/*.json'
       - 'docs/**'
       - '.claude/**'
 

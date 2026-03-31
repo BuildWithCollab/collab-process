@@ -1,8 +1,13 @@
-name: Main
+name: Main Branch
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.json'
+      - 'docs/**'
+      - '.claude/**'
 
 permissions:
   contents: read
