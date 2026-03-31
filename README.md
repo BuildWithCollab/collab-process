@@ -25,7 +25,7 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
 ## Quick Start
 
 ```cpp
-#include <collab/process/process.hpp>
+#include <collab/process.hpp>
 
 using namespace collab::process;
 
@@ -350,7 +350,7 @@ target("myapp")
 ```
 
 ```cpp
-#include <collab/process/process.hpp>
+#include <collab/process.hpp>
 ```
 
 ## Testing
