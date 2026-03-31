@@ -4,6 +4,7 @@
 #include <windows.h>
 #else
 #include <signal.h>
+#include <sys/wait.h>
 #endif
 
 namespace collab::process {
@@ -37,7 +38,11 @@ auto ProcessRef::kill() -> bool {
     CloseHandle(proc);
     return ok != 0;
 #else
-    return ::kill(pid_, SIGKILL) == 0;
+    if (::kill(pid_, SIGKILL) != 0) return false;
+    // Reap the zombie so is_alive() returns false after kill.
+    // WNOHANG: best-effort — if we're not the parent, this is a no-op.
+    waitpid(pid_, nullptr, WNOHANG);
+    return true;
 #endif
 }
 
