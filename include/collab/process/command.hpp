@@ -167,6 +167,7 @@ public:
 
     auto run(this Command&& self) -> std::expected<Result, SpawnError>;
     auto spawn(this Command&& self) -> std::expected<RunningProcess, SpawnError>;
+    auto spawn_detached(this Command&& self) -> std::expected<int, SpawnError>;
 };
 
 }  // namespace collab::process

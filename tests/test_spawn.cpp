@@ -207,6 +207,56 @@ TEST_CASE("spawn: stop() on already-exited process returns not_running", "[spawn
 
 // ── kill (immediate) ───────────────────────────────────────────
 
+// ── spawn_detached ─────────────────────────────────────────────
+
+TEST_CASE("spawn_detached: returns PID for a valid command", "[spawn_detached]") {
+    CommandConfig config;
+    config.program = helper_path();
+    config.args = {"sleep", "2"};
+    config.stdout_mode = CommandConfig::OutputMode::discard;
+    config.stderr_mode = CommandConfig::OutputMode::discard;
+
+    auto pid = collab::process::spawn_detached(config);
+    REQUIRE(pid.has_value());
+    CHECK(*pid > 0);
+
+    // Cleanup — process is alive with no owner
+    ProcessRef ref(*pid);
+    ref.kill();
+}
+
+TEST_CASE("spawn_detached: returns error for invalid command", "[spawn_detached]") {
+    CommandConfig config;
+    config.program = "not_a_real_program_xyz";
+
+    auto pid = collab::process::spawn_detached(config);
+    REQUIRE_FALSE(pid.has_value());
+    CHECK(pid.error().kind == SpawnError::command_not_found);
+}
+
+TEST_CASE("spawn_detached: process survives scope exit", "[spawn_detached]") {
+    int pid;
+    {
+        CommandConfig config;
+        config.program = helper_path();
+        config.args = {"sleep", "10"};
+        config.stdout_mode = CommandConfig::OutputMode::discard;
+        config.stderr_mode = CommandConfig::OutputMode::discard;
+
+        auto result = collab::process::spawn_detached(config);
+        REQUIRE(result.has_value());
+        pid = *result;
+        // result goes out of scope — it's just an int, no RAII
+    }
+
+    // Process should still be alive — no destructor killed it
+    ProcessRef ref(pid);
+    CHECK(ref.is_alive());
+
+    // Cleanup
+    ref.kill();
+}
+
 // ── detach ─────────────────────────────────────────────────────
 
 TEST_CASE("spawn: detach() releases ownership and returns PID", "[spawn]") {

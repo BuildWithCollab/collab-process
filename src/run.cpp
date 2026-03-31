@@ -101,6 +101,14 @@ auto spawn(CommandConfig config, IoCallbacks callbacks)
     return RunningProcess(std::move(*impl));
 }
 
+auto spawn_detached(CommandConfig config, IoCallbacks callbacks)
+    -> std::expected<int, SpawnError> {
+    auto proc = spawn(std::move(config), std::move(callbacks));
+    if (!proc)
+        return std::unexpected(proc.error());
+    return std::move(*proc).detach();
+}
+
 // Command fluent builder delegates
 auto Command::run(this Command&& self) -> std::expected<Result, SpawnError> {
     return collab::process::run(std::move(self.config_), std::move(self.callbacks_));
@@ -108,6 +116,10 @@ auto Command::run(this Command&& self) -> std::expected<Result, SpawnError> {
 
 auto Command::spawn(this Command&& self) -> std::expected<RunningProcess, SpawnError> {
     return collab::process::spawn(std::move(self.config_), std::move(self.callbacks_));
+}
+
+auto Command::spawn_detached(this Command&& self) -> std::expected<int, SpawnError> {
+    return collab::process::spawn_detached(std::move(self.config_), std::move(self.callbacks_));
 }
 
 }  // namespace collab::process

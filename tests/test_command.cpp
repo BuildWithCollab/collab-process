@@ -235,6 +235,31 @@ TEST_CASE("command: spawn() returns a RunningProcess", "[command][spawn]") {
     proc->kill();
 }
 
+// ── spawn_detached() via Command ────────────────────────────────
+
+TEST_CASE("command: spawn_detached() returns PID", "[command][spawn_detached]") {
+    auto pid = Command(helper_path())
+        .args({"sleep", "2"})
+        .stdout_discard()
+        .stderr_discard()
+        .spawn_detached();
+
+    REQUIRE(pid.has_value());
+    CHECK(*pid > 0);
+
+    // Cleanup
+    ProcessRef ref(*pid);
+    ref.kill();
+}
+
+TEST_CASE("command: spawn_detached() error for invalid program", "[command][spawn_detached]") {
+    auto pid = Command("not_a_real_program_xyz")
+        .spawn_detached();
+
+    REQUIRE_FALSE(pid.has_value());
+    CHECK(pid.error().kind == SpawnError::command_not_found);
+}
+
 // ── Exit codes ─────────────────────────────────────────────────
 
 TEST_CASE("command: captures exit code", "[command]") {

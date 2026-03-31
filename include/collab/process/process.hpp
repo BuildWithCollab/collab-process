@@ -21,4 +21,9 @@ auto run(CommandConfig config, IoCallbacks callbacks = {})
 auto spawn(CommandConfig config, IoCallbacks callbacks = {})
     -> std::expected<RunningProcess, SpawnError>;
 
+// Fire-and-forget: spawn with no ownership. Returns the PID.
+// The child is fully detached — no RAII kill, no destructor cleanup.
+auto spawn_detached(CommandConfig config, IoCallbacks callbacks = {})
+    -> std::expected<int, SpawnError>;
+
 }  // namespace collab::process

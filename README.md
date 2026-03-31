@@ -273,7 +273,7 @@ auto result = std::move(cmd).run();
 | **Stdout** | `stdout_capture()`, `stdout_inherit()`, `stdout_discard()`, `stdout_callback(fn)` |
 | **Stderr** | `stderr_capture()`, `stderr_inherit()`, `stderr_discard()`, `stderr_merge()`, `stderr_callback(fn)` |
 | **Behavior** | `timeout(ms)`, `detached()` |
-| **Execute** | `run()` → `expected<Result>`, `spawn()` → `expected<RunningProcess>` |
+| **Execute** | `run()` → `expected<Result>`, `spawn()` → `expected<RunningProcess>`, `spawn_detached()` → `expected<int>` |
 
 ### Free Functions
 
@@ -287,6 +287,10 @@ auto run(CommandConfig config, IoCallbacks callbacks = {})
 
 auto spawn(CommandConfig config, IoCallbacks callbacks = {})
     -> std::expected<RunningProcess, SpawnError>;
+
+// Fire-and-forget: no ownership, no RAII kill. Returns the PID.
+auto spawn_detached(CommandConfig config, IoCallbacks callbacks = {})
+    -> std::expected<int, SpawnError>;
 
 }
 ```
