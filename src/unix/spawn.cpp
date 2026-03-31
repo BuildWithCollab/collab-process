@@ -82,7 +82,7 @@ struct UnixProcessImpl : RunningProcess::Impl {
         return Result{
             .stdout_content = std::move(stdout_content),
             .stderr_content = std::move(stderr_content),
-            .exit_code = timed_out ? -1 : cached_exit_code,
+            .exit_code = timed_out ? std::optional<int>{} : std::optional<int>{cached_exit_code},
             .timed_out = timed_out,
         };
     }
@@ -96,26 +96,51 @@ struct UnixProcessImpl : RunningProcess::Impl {
         return build_result();
     }
 
-    auto wait_for(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError> override {
-        if (!waited) {
-            read_pipes();
-            waited = true;
-        }
-
+    // Public wait_for: poll only, returns nullopt on timeout.
+    auto wait_for(std::chrono::milliseconds timeout) -> std::optional<Result> override {
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             int status = 0;
             pid_t result = waitpid(child_pid, &status, WNOHANG);
             if (result != 0) {
                 cached_exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+                if (!waited) {
+                    read_pipes();
+                    waited = true;
+                }
                 return build_result();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{50});
         }
 
-        // Timeout — kill
+        return std::nullopt;
+    }
+
+    // Used by run() — kills on timeout.
+    auto wait_for_and_kill(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError> override {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            int status = 0;
+            pid_t result = waitpid(child_pid, &status, WNOHANG);
+            if (result != 0) {
+                cached_exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+                if (!waited) {
+                    read_pipes();
+                    waited = true;
+                }
+                return build_result();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        }
+
         ::kill(child_pid, SIGKILL);
         waitpid(child_pid, nullptr, 0);
+
+        if (!waited) {
+            read_pipes();
+            waited = true;
+        }
+
         return build_result(true);
     }
 
@@ -153,7 +178,8 @@ auto platform_spawn(SpawnParams params)
 
     // Stdin pipe
     int stdin_pipe[2] = {-1, -1};
-    bool pipe_stdin = !params.stdin_content.empty() || !params.stdin_path.empty();
+    bool pipe_stdin = (params.stdin_mode == CommandConfig::StdinMode::content)
+                   || (params.stdin_mode == CommandConfig::StdinMode::file);
     if (pipe_stdin && pipe(stdin_pipe) < 0)
         return std::unexpected(SpawnError{SpawnError::pipe_creation_failed, errno});
 
@@ -183,7 +209,7 @@ auto platform_spawn(SpawnParams params)
             close(stdin_pipe[1]);
             dup2(stdin_pipe[0], STDIN_FILENO);
             close(stdin_pipe[0]);
-        } else if (params.stdin_closed) {
+        } else if (params.stdin_mode == CommandConfig::StdinMode::closed) {
             close(STDIN_FILENO);
         }
 
@@ -244,9 +270,21 @@ auto platform_spawn(SpawnParams params)
     if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
 
     // Write stdin content in a thread to avoid deadlock
-    if (stdin_pipe[1] >= 0 && !params.stdin_content.empty()) {
+    if (stdin_pipe[1] >= 0 && params.stdin_mode == CommandConfig::StdinMode::content) {
         std::thread([content = std::move(params.stdin_content), fd = stdin_pipe[1]] {
             (void)::write(fd, content.data(), content.size());
+            close(fd);
+        }).detach();
+    } else if (stdin_pipe[1] >= 0 && params.stdin_mode == CommandConfig::StdinMode::file) {
+        std::thread([path = std::move(params.stdin_path), fd = stdin_pipe[1]] {
+            int file = open(path.c_str(), O_RDONLY);
+            if (file >= 0) {
+                char buf[4096];
+                ssize_t n;
+                while ((n = ::read(file, buf, sizeof(buf))) > 0)
+                    (void)::write(fd, buf, n);
+                close(file);
+            }
             close(fd);
         }).detach();
     } else if (stdin_pipe[1] >= 0) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 namespace collab::process {
@@ -22,7 +23,7 @@ struct SpawnError {
 struct Result {
     std::string stdout_content;
     std::string stderr_content;
-    int exit_code = -1;
+    std::optional<int> exit_code;
     bool timed_out = false;
 
     auto ok() const -> bool { return exit_code == 0 && !timed_out; }

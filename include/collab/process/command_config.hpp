@@ -30,14 +30,11 @@ struct CommandConfig {
     OutputMode stderr_mode = OutputMode::inherit;
     bool stderr_merge = false;  // merge stderr into stdout stream
 
-    // Stdin — no enum, determined by what you set:
-    //   nothing          → inherit (passthrough from terminal)
-    //   stdin_content    → pipe string in
-    //   stdin_path       → pipe file in
-    //   stdin_closed     → close immediately
-    std::string stdin_content;
-    std::filesystem::path stdin_path;
-    bool stdin_closed = false;
+    // Stdin
+    enum class StdinMode { inherit, content, file, closed };
+    StdinMode stdin_mode = StdinMode::inherit;
+    std::string stdin_content;           // read when mode == content
+    std::filesystem::path stdin_path;    // read when mode == file
 
     // Behavior
     std::chrono::milliseconds timeout{0};  // 0 = no timeout

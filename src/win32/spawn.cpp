@@ -23,6 +23,9 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     HANDLE stdout_read = nullptr;
     HANDLE stderr_read = nullptr;
 
+    // Stdin writer thread — joined before reading pipes or destroying
+    std::thread stdin_thread;
+
     // Callbacks
     collab::process::move_only_function<void(std::string_view)> on_stdout;
     collab::process::move_only_function<void(std::string_view)> on_stderr;
@@ -32,7 +35,14 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     std::string stderr_content;
     bool waited = false;
 
+    void join_stdin_thread() {
+        if (stdin_thread.joinable())
+            stdin_thread.join();
+    }
+
     ~Win32ProcessImpl() override {
+        // Ensure stdin writer has finished before closing handles
+        join_stdin_thread();
         if (stdout_read) CloseHandle(stdout_read);
         if (stderr_read) CloseHandle(stderr_read);
         if (process_handle) CloseHandle(process_handle);
@@ -81,6 +91,7 @@ struct Win32ProcessImpl : RunningProcess::Impl {
             return std::unexpected(SpawnError{SpawnError::platform_error, 0});
 
         if (!waited) {
+            join_stdin_thread();
             read_pipes();
             WaitForSingleObject(process_handle, INFINITE);
             waited = true;
@@ -105,28 +116,91 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         };
     }
 
-    auto wait_for(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError> override {
+    // Public wait_for: poll only, no kill. Returns nullopt on timeout.
+    // Does NOT start a pipe reader — if the process fills the pipe buffer
+    // and blocks, wait_for will still return after the timeout.
+    auto wait_for(std::chrono::milliseconds timeout) -> std::optional<Result> override {
         if (!process_handle)
-            return std::unexpected(SpawnError{SpawnError::platform_error, 0});
+            return std::nullopt;
 
+        DWORD wait_ms = static_cast<DWORD>(timeout.count());
+        DWORD wait_result = WaitForSingleObject(process_handle, wait_ms);
+
+        if (wait_result == WAIT_TIMEOUT)
+            return std::nullopt;
+
+        // Process exited — safe to drain pipes now
         if (!waited) {
             read_pipes();
             waited = true;
+        }
+
+        DWORD exit_code = 0;
+        GetExitCodeProcess(process_handle, &exit_code);
+
+        auto trim = [](std::string& s) {
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
+                s.pop_back();
+        };
+        trim(stdout_content);
+        trim(stderr_content);
+
+        return Result{
+            .stdout_content = std::move(stdout_content),
+            .stderr_content = std::move(stderr_content),
+            .exit_code = static_cast<int>(exit_code),
+            .timed_out = false,
+        };
+    }
+
+    // Used by run() — reads pipes concurrently to avoid deadlock with
+    // processes that produce large output, and kills on timeout.
+    auto wait_for_and_kill(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError> override {
+        if (!process_handle)
+            return std::unexpected(SpawnError{SpawnError::platform_error, 0});
+
+        // Start pipe reader concurrently — prevents deadlock when the child
+        // fills the pipe buffer (child blocks writing, parent blocks waiting).
+        std::thread pipe_reader;
+        if (!waited) {
+            pipe_reader = std::thread([this] { read_pipes(); });
         }
 
         DWORD wait_ms = static_cast<DWORD>(timeout.count());
         DWORD wait_result = WaitForSingleObject(process_handle, wait_ms);
 
         if (wait_result == WAIT_TIMEOUT) {
-            TerminateProcess(process_handle, 1);
+            // Kill the process tree so pipes close and the reader can finish
+            if (job_handle)
+                TerminateJobObject(job_handle, 1);
+            else
+                TerminateProcess(process_handle, 1);
             WaitForSingleObject(process_handle, 5000);
+
+            if (pipe_reader.joinable()) {
+                pipe_reader.join();
+                waited = true;
+            }
+
+            auto trim = [](std::string& s) {
+                while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
+                    s.pop_back();
+            };
+            trim(stdout_content);
+            trim(stderr_content);
 
             return Result{
                 .stdout_content = std::move(stdout_content),
                 .stderr_content = std::move(stderr_content),
-                .exit_code = -1,
+                .exit_code = std::nullopt,
                 .timed_out = true,
             };
+        }
+
+        // Process exited within timeout — pipe reader finishes naturally
+        if (pipe_reader.joinable()) {
+            pipe_reader.join();
+            waited = true;
         }
 
         DWORD exit_code = 0;
@@ -176,6 +250,17 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         if (job_handle)
             return TerminateJobObject(job_handle, 1) != 0;
         return TerminateProcess(process_handle, 1) != 0;
+    }
+
+    void release_for_detach() override {
+        // Remove the kill-on-close flag so closing the job handle
+        // doesn't kill the child process.
+        if (job_handle) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_info = {};
+            // Clear the kill-on-close flag
+            SetInformationJobObject(job_handle, JobObjectExtendedLimitInformation,
+                                    &job_info, sizeof(job_info));
+        }
     }
 };
 
@@ -236,9 +321,7 @@ auto platform_spawn(SpawnParams params)
     // Determine if interactive (all streams inherit, not detached)
     bool is_interactive = (params.stdout_mode == CommandConfig::OutputMode::inherit)
         && (params.stderr_mode == CommandConfig::OutputMode::inherit)
-        && params.stdin_content.empty()
-        && params.stdin_path.empty()
-        && !params.stdin_closed
+        && (params.stdin_mode == CommandConfig::StdinMode::inherit)
         && !params.detached;
 
     if (is_interactive)
@@ -250,7 +333,8 @@ auto platform_spawn(SpawnParams params)
 
     // Stdin pipe
     HANDLE stdin_read = nullptr, stdin_write = nullptr;
-    bool pipe_stdin = !params.stdin_content.empty() || !params.stdin_path.empty();
+    bool pipe_stdin = (params.stdin_mode == CommandConfig::StdinMode::content)
+                   || (params.stdin_mode == CommandConfig::StdinMode::file);
 
     if (pipe_stdin) {
         if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0))
@@ -287,14 +371,17 @@ auto platform_spawn(SpawnParams params)
         SetHandleInformation(stderr_read_h, HANDLE_FLAG_INHERIT, 0);
     }
 
-    // NUL handle for discard mode
-    HANDLE nul_handle = nullptr;
-    bool need_nul = (params.stdout_mode == CommandConfig::OutputMode::discard && !stdout_write)
-        || (params.stderr_mode == CommandConfig::OutputMode::discard && !stderr_write);
-    if (need_nul || params.stdout_mode == CommandConfig::OutputMode::discard
+    // NUL handles for discard mode and stdin_closed
+    HANDLE nul_write = nullptr;
+    HANDLE nul_read = nullptr;
+    if (params.stdout_mode == CommandConfig::OutputMode::discard
         || params.stderr_mode == CommandConfig::OutputMode::discard) {
-        nul_handle = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE,
-                                 &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        nul_write = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE,
+                                &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
+    if (params.stdin_mode == CommandConfig::StdinMode::closed) {
+        nul_read = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ,
+                               &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     }
 
     // Setup STARTUPINFO
@@ -304,13 +391,13 @@ auto platform_spawn(SpawnParams params)
     if (!is_interactive) {
         si.dwFlags = STARTF_USESTDHANDLES;
         si.hStdInput = pipe_stdin ? stdin_read
-                       : params.stdin_closed ? nullptr
+                       : nul_read ? nul_read
                        : GetStdHandle(STD_INPUT_HANDLE);
 
         if (params.stdout_mode == CommandConfig::OutputMode::capture)
             si.hStdOutput = stdout_write;
         else if (params.stdout_mode == CommandConfig::OutputMode::discard)
-            si.hStdOutput = nul_handle;
+            si.hStdOutput = nul_write;
         else
             si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
 
@@ -319,7 +406,7 @@ auto platform_spawn(SpawnParams params)
         else if (params.stderr_mode == CommandConfig::OutputMode::capture)
             si.hStdError = stderr_write;
         else if (params.stderr_mode == CommandConfig::OutputMode::discard)
-            si.hStdError = nul_handle;
+            si.hStdError = nul_write;
         else
             si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     }
@@ -363,11 +450,12 @@ auto platform_spawn(SpawnParams params)
         &si, &pi
     );
 
-    // Cleanup write-side handles (child has them now)
+    // Cleanup write-side handles and NUL handles (child has them now)
     if (stdin_read) CloseHandle(stdin_read);
     if (stdout_write) CloseHandle(stdout_write);
     if (stderr_write) CloseHandle(stderr_write);
-    if (nul_handle) CloseHandle(nul_handle);
+    if (nul_write) CloseHandle(nul_write);
+    if (nul_read) CloseHandle(nul_read);
 
     if (!ok) {
         int err = static_cast<int>(GetLastError());
@@ -384,14 +472,32 @@ auto platform_spawn(SpawnParams params)
 
     CloseHandle(pi.hThread);
 
-    // Write stdin content (in a thread to avoid deadlock with stdout reading)
-    if (stdin_write && !params.stdin_content.empty()) {
-        std::thread([content = std::move(params.stdin_content), h = stdin_write] {
-            DWORD written;
-            WriteFile(h, content.data(),
-                      static_cast<DWORD>(content.size()), &written, nullptr);
-            CloseHandle(h);
-        }).detach();
+    // Write stdin content in a thread to avoid deadlock with stdout reading.
+    // Thread is stored in impl and joined before reading pipes or destroying.
+    if (stdin_write && params.stdin_mode == CommandConfig::StdinMode::content) {
+        impl->stdin_thread = std::thread(
+            [content = std::move(params.stdin_content), h = stdin_write] {
+                DWORD written;
+                WriteFile(h, content.data(),
+                          static_cast<DWORD>(content.size()), &written, nullptr);
+                CloseHandle(h);
+            });
+    } else if (stdin_write && params.stdin_mode == CommandConfig::StdinMode::file) {
+        impl->stdin_thread = std::thread(
+            [path = std::move(params.stdin_path), h = stdin_write] {
+                HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (file != INVALID_HANDLE_VALUE) {
+                    char buf[4096];
+                    DWORD bytes_read;
+                    while (ReadFile(file, buf, sizeof(buf), &bytes_read, nullptr) && bytes_read > 0) {
+                        DWORD written;
+                        WriteFile(h, buf, bytes_read, &written, nullptr);
+                    }
+                    CloseHandle(file);
+                }
+                CloseHandle(h);
+            });
     } else if (stdin_write) {
         CloseHandle(stdin_write);
     }

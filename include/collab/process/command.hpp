@@ -77,25 +77,26 @@ public:
     // -- Stdin --
 
     auto stdin_string(this auto&& self, std::string content) -> decltype(auto) {
+        self.config_.stdin_mode = CommandConfig::StdinMode::content;
         self.config_.stdin_content = std::move(content);
         return std::forward<decltype(self)>(self);
     }
 
     auto stdin_file(this auto&& self, std::filesystem::path path) -> decltype(auto) {
+        self.config_.stdin_mode = CommandConfig::StdinMode::file;
         self.config_.stdin_path = std::move(path);
         return std::forward<decltype(self)>(self);
     }
 
     auto stdin_close(this auto&& self) -> decltype(auto) {
-        self.config_.stdin_closed = true;
+        self.config_.stdin_mode = CommandConfig::StdinMode::closed;
         return std::forward<decltype(self)>(self);
     }
 
     auto stdin_inherit(this auto&& self) -> decltype(auto) {
-        // Default — clear any previously set stdin options
+        self.config_.stdin_mode = CommandConfig::StdinMode::inherit;
         self.config_.stdin_content.clear();
         self.config_.stdin_path.clear();
-        self.config_.stdin_closed = false;
         return std::forward<decltype(self)>(self);
     }
 

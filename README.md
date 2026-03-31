@@ -81,14 +81,11 @@ struct CommandConfig {
     OutputMode stderr_mode = OutputMode::inherit;
     bool stderr_merge = false;            // merge stderr into stdout stream
 
-    // Stdin — determined by what you set:
-    //   nothing       → inherit (terminal passthrough)
-    //   stdin_content → pipe string in
-    //   stdin_path    → pipe file in
-    //   stdin_closed  → close immediately
-    std::string stdin_content;
-    std::filesystem::path stdin_path;
-    bool stdin_closed = false;
+    // Stdin — explicit enum, no ambiguity
+    enum class StdinMode { inherit, content, file, closed };
+    StdinMode stdin_mode = StdinMode::inherit;
+    std::string stdin_content;            // read when mode == content
+    std::filesystem::path stdin_path;     // read when mode == file
 
     // Behavior
     std::chrono::milliseconds timeout{0}; // 0 = no timeout
@@ -138,12 +135,12 @@ Returned by `run()` and `RunningProcess::wait()`.
 
 ```cpp
 struct Result {
-    std::string stdout_content;   // empty unless stdout_mode == capture
-    std::string stderr_content;   // empty unless stderr_mode == capture
-    int exit_code = -1;
+    std::string stdout_content;           // empty unless stdout_mode == capture
+    std::string stderr_content;           // empty unless stderr_mode == capture
+    std::optional<int> exit_code;         // nullopt if process never exited
     bool timed_out = false;
 
-    auto ok() const -> bool;     // exit_code == 0 && !timed_out
+    auto ok() const -> bool;             // exit_code == 0 && !timed_out
 };
 ```
 
@@ -183,7 +180,7 @@ enum class StopResult {
 
 ### RunningProcess
 
-Move-only RAII handle returned by `spawn()`. Owns the job object (Windows) / process group (Unix) for tree operations. Destructor detaches — does not kill.
+Move-only RAII handle returned by `spawn()`. Owns the job object (Windows) / process group (Unix) for tree operations. **Destructor kills the process** — like `jthread`, cleanup is automatic.
 
 ```cpp
 class RunningProcess {
@@ -191,13 +188,20 @@ class RunningProcess {
     auto is_alive() const -> bool;
 
     auto wait() -> std::expected<Result, SpawnError>;
-    auto wait_for(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError>;
+
+    // Poll: returns the Result if done, nullopt if still running.
+    // Does NOT kill the process on timeout.
+    auto wait_for(std::chrono::milliseconds timeout) -> std::optional<Result>;
 
     // Graceful shutdown with escalation + tree kill
     auto stop(std::chrono::milliseconds grace = 5s) -> StopResult;
 
     // Immediate tree kill
     auto kill() -> bool;
+
+    // Release ownership — child survives destruction.
+    // Returns PID for reconnection via ProcessRef.
+    auto detach(this RunningProcess&& self) -> int;
 };
 ```
 
@@ -209,6 +213,12 @@ if (!proc) return;
 auto stop_result = proc->stop(5s);
 if (stop_result == StopResult::killed)
     log("had to force kill");
+```
+
+```cpp
+// Detach if the child should outlive this handle
+int pid = std::move(*proc).detach();
+save_to_db(pid);  // reconnect later with ProcessRef
 ```
 
 ### ProcessRef
@@ -348,7 +358,12 @@ target("myapp")
 Tests use [Catch2](https://github.com/catchorg/Catch2) and a `test_helper` binary that provides deterministic, cross-platform process behavior (echo, stdin relay, env printing, sleeping, flooding).
 
 ```bash
-xmake test -y           # run all tests
-xmake run collab-process-tests -c "[run]"      # just the run tests
-xmake run collab-process-tests -c "[spawn]"    # just the spawn tests
+xmake test -y                                          # run all tests
+xmake run collab-process-tests "[run]"                 # just the run tests
+xmake run collab-process-tests "[spawn]"               # just the spawn tests
+xmake run collab-process-tests "[command]"             # just the fluent builder tests
+xmake run collab-process-tests "[utilities]"           # just the utility tests
+xmake run collab-process-tests "[callbacks]"           # just the I/O callback tests
+xmake run collab-process-tests "[errors]"              # just the error handling tests
+xmake run collab-process-tests "[process_ref]"         # just the ProcessRef tests
 ```

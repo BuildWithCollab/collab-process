@@ -29,9 +29,9 @@ struct SpawnParams {
     bool stderr_merge = false;
 
     // Stdin
+    CommandConfig::StdinMode stdin_mode = CommandConfig::StdinMode::inherit;
     std::string stdin_content;
     std::filesystem::path stdin_path;
-    bool stdin_closed = false;
 
     // Behavior
     bool detached = false;

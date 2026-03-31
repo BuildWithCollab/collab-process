@@ -109,3 +109,9 @@ TEST_CASE("run: Result::ok() is false when timed out", "[run]") {
     r.timed_out = true;
     CHECK_FALSE(r.ok());
 }
+
+TEST_CASE("run: Result::ok() is false when exit_code is nullopt", "[run]") {
+    Result r;
+    // Default exit_code is nullopt
+    CHECK_FALSE(r.ok());
+}

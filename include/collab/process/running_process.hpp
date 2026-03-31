@@ -3,6 +3,7 @@
 #include <chrono>
 #include <expected>
 #include <memory>
+#include <optional>
 
 #include "collab/process/result.hpp"
 
@@ -12,6 +13,9 @@ class RunningProcess {
 public:
     RunningProcess(RunningProcess&&) noexcept;
     auto operator=(RunningProcess&&) noexcept -> RunningProcess&;
+
+    // Destructor kills the process if still alive. Use detach() to release
+    // ownership if you want the child to outlive this handle.
     ~RunningProcess();
 
     RunningProcess(const RunningProcess&) = delete;
@@ -21,7 +25,7 @@ public:
     auto is_alive() const -> bool;
 
     auto wait() -> std::expected<Result, SpawnError>;
-    auto wait_for(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError>;
+    auto wait_for(std::chrono::milliseconds timeout) -> std::optional<Result>;
 
     // Graceful: SIGTERM → grace → SIGKILL (Unix)
     //           CTRL_BREAK → grace → TerminateProcess (Windows)
@@ -30,6 +34,10 @@ public:
 
     // Immediate tree kill.
     auto kill() -> bool;
+
+    // Release ownership — child survives. Returns PID for reconnection
+    // via ProcessRef. Consumes the RunningProcess (&&-qualified).
+    auto detach(this RunningProcess&& self) -> int;
 
     // Internal — used by spawn() to construct
     struct Impl;

@@ -35,9 +35,9 @@ auto run(CommandConfig config, IoCallbacks callbacks)
         .stdout_mode = config.stdout_mode,
         .stderr_mode = config.stderr_mode,
         .stderr_merge = config.stderr_merge,
+        .stdin_mode = config.stdin_mode,
         .stdin_content = std::move(config.stdin_content),
         .stdin_path = std::move(config.stdin_path),
-        .stdin_closed = config.stdin_closed,
         .detached = config.detached,
         .needs_cmd_wrapper = needs_cmd_wrapper,
         .on_stdout = std::move(callbacks.on_stdout),
@@ -49,14 +49,14 @@ auto run(CommandConfig config, IoCallbacks callbacks)
     if (!impl)
         return std::unexpected(impl.error());
 
-    // Create the RunningProcess handle
-    auto proc = RunningProcess(std::move(*impl));
-
-    // For blocking run: wait with optional timeout
+    // For blocking run with timeout: use wait_for_and_kill directly on the impl
+    // so run() kills on timeout. The public RunningProcess::wait_for() leaves the
+    // process alive (it's a poll).
     if (config.timeout.count() > 0)
-        return proc.wait_for(config.timeout);
-    else
-        return proc.wait();
+        return (*impl)->wait_for_and_kill(config.timeout);
+
+    auto proc = RunningProcess(std::move(*impl));
+    return proc.wait();
 }
 
 auto spawn(CommandConfig config, IoCallbacks callbacks)
@@ -85,9 +85,9 @@ auto spawn(CommandConfig config, IoCallbacks callbacks)
         .stdout_mode = config.stdout_mode,
         .stderr_mode = config.stderr_mode,
         .stderr_merge = config.stderr_merge,
+        .stdin_mode = config.stdin_mode,
         .stdin_content = std::move(config.stdin_content),
         .stdin_path = std::move(config.stdin_path),
-        .stdin_closed = config.stdin_closed,
         .detached = config.detached,
         .needs_cmd_wrapper = needs_cmd_wrapper,
         .on_stdout = std::move(callbacks.on_stdout),
