@@ -186,10 +186,13 @@ TEST_CASE("command: working_directory() changes cwd", "[command][working_dir]") 
         .args({"cwd"})
         .working_directory(temp_dir)
         .stdout_capture()
-        .stderr_discard()
+        .stderr_capture()
         .run();
 
     REQUIRE(result.has_value());
+    INFO("exit_code: " << (result->exit_code ? std::to_string(*result->exit_code) : "nullopt"));
+    INFO("stdout: [" << result->stdout_content << "]");
+    INFO("stderr: [" << result->stderr_content << "]");
     REQUIRE(result->ok());
 
     auto expected = fs::canonical(temp_dir).string();

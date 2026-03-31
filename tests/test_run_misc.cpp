@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <string>
 
 namespace fs = std::filesystem;
 using namespace collab::process;
@@ -28,10 +29,13 @@ TEST_CASE("run: working_dir changes the child's working directory", "[run][worki
     config.args = {"cwd"};
     config.working_dir = temp_dir;
     config.stdout_mode = CommandConfig::OutputMode::capture;
-    config.stderr_mode = CommandConfig::OutputMode::discard;
+    config.stderr_mode = CommandConfig::OutputMode::capture;
 
     auto result = collab::process::run(config);
     REQUIRE(result.has_value());
+    INFO("exit_code: " << (result->exit_code ? std::to_string(*result->exit_code) : "nullopt"));
+    INFO("stdout: [" << result->stdout_content << "]");
+    INFO("stderr: [" << result->stderr_content << "]");
     REQUIRE(result->ok());
 
     // Normalize both to canonical form for comparison.

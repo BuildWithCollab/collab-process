@@ -155,7 +155,8 @@ struct UnixProcessImpl : RunningProcess::Impl {
     auto stop(std::chrono::milliseconds grace) -> StopResult override {
         if (!is_alive()) return StopResult::not_running;
 
-        ::kill(child_pid, SIGTERM);
+        // Signal the process group (negative PID) for tree kill
+        ::kill(-child_pid, SIGTERM);
 
         auto deadline = std::chrono::steady_clock::now() + grace;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -163,15 +164,16 @@ struct UnixProcessImpl : RunningProcess::Impl {
             std::this_thread::sleep_for(std::chrono::milliseconds{50});
         }
 
-        // Escalate
-        ::kill(child_pid, SIGKILL);
+        // Escalate — kill entire process group
+        ::kill(-child_pid, SIGKILL);
         waitpid(child_pid, nullptr, 0);
         return StopResult::killed;
     }
 
     auto kill() -> bool override {
         if (!is_alive()) return false;
-        ::kill(child_pid, SIGKILL);
+        // Kill entire process group
+        ::kill(-child_pid, SIGKILL);
         waitpid(child_pid, nullptr, 0);
         return true;
     }
@@ -247,7 +249,9 @@ auto platform_spawn(SpawnParams params)
         if (!params.working_dir.empty())
             (void)chdir(params.working_dir.c_str());
 
-        // Detach
+        // Always create own process group — isolates child signals from parent
+        // and enables tree kill via killpg. setsid() for full detach.
+        setpgid(0, 0);
         if (params.detached)
             setsid();
 
