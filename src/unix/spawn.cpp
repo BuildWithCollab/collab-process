@@ -2,15 +2,12 @@
 #include "../running_process_impl.hpp"
 
 #include <chrono>
-#include <cstdlib>
 #include <csignal>
 #include <fcntl.h>
 #include <string>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
-
-extern "C" char** environ;
 
 namespace collab::process::detail {
 
@@ -250,16 +247,6 @@ auto platform_spawn(SpawnParams params)
         if (!params.working_dir.empty())
             (void)chdir(params.working_dir.c_str());
 
-        // Environment — replace inherited env with the prepared block.
-        // On Windows, CreateProcessW takes a full env block. On Unix, we
-        // need to clear + rebuild manually so env_remove/env_clear work.
-        ::environ = nullptr;  // clear inherited env
-        for (auto& entry : params.env_entries) {
-            auto eq = entry.find('=');
-            if (eq != std::string::npos)
-                setenv(entry.substr(0, eq).c_str(), entry.substr(eq + 1).c_str(), 1);
-        }
-
         // Detach
         if (params.detached)
             setsid();
@@ -271,8 +258,18 @@ auto platform_spawn(SpawnParams params)
             argv.push_back(a.c_str());
         argv.push_back(nullptr);
 
-        execvp(params.resolved_program.c_str(),
-               const_cast<char* const*>(argv.data()));
+        // Build envp from the prepared env_entries block.
+        // Uses execve() instead of execvp() so env_remove/env_clear work —
+        // the prepared block already has removals/clears applied.
+        // We have the resolved full path, so PATH search isn't needed.
+        std::vector<const char*> envp;
+        for (auto& entry : params.env_entries)
+            envp.push_back(entry.c_str());
+        envp.push_back(nullptr);
+
+        execve(params.resolved_program.c_str(),
+               const_cast<char* const*>(argv.data()),
+               const_cast<char* const*>(envp.data()));
         _exit(127);
     }
 
