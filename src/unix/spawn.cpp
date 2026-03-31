@@ -2,12 +2,15 @@
 #include "../running_process_impl.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <csignal>
 #include <fcntl.h>
 #include <string>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+
+extern "C" char** environ;
 
 namespace collab::process::detail {
 
@@ -116,32 +119,40 @@ struct UnixProcessImpl : RunningProcess::Impl {
         return std::nullopt;
     }
 
-    // Used by run() — kills on timeout.
+    // Used by run() — reads pipes concurrently to avoid deadlock with
+    // processes that produce large output, and kills on timeout.
     auto wait_for_and_kill(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError> override {
+        // Start pipe reader concurrently — prevents deadlock when the child
+        // fills the pipe buffer (child blocks writing, parent blocks waiting).
+        std::thread pipe_reader;
+        if (!waited) {
+            pipe_reader = std::thread([this] { read_pipes(); });
+        }
+
         auto deadline = std::chrono::steady_clock::now() + timeout;
+        bool exited = false;
         while (std::chrono::steady_clock::now() < deadline) {
             int status = 0;
             pid_t result = waitpid(child_pid, &status, WNOHANG);
             if (result != 0) {
                 cached_exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-                if (!waited) {
-                    read_pipes();
-                    waited = true;
-                }
-                return build_result();
+                exited = true;
+                break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{50});
         }
 
-        ::kill(child_pid, SIGKILL);
-        waitpid(child_pid, nullptr, 0);
+        if (!exited) {
+            ::kill(child_pid, SIGKILL);
+            waitpid(child_pid, nullptr, 0);
+        }
 
-        if (!waited) {
-            read_pipes();
+        if (pipe_reader.joinable()) {
+            pipe_reader.join();
             waited = true;
         }
 
-        return build_result(true);
+        return build_result(!exited);
     }
 
     auto stop(std::chrono::milliseconds grace) -> StopResult override {
@@ -239,7 +250,10 @@ auto platform_spawn(SpawnParams params)
         if (!params.working_dir.empty())
             (void)chdir(params.working_dir.c_str());
 
-        // Environment
+        // Environment — replace inherited env with the prepared block.
+        // On Windows, CreateProcessW takes a full env block. On Unix, we
+        // need to clear + rebuild manually so env_remove/env_clear work.
+        ::environ = nullptr;  // clear inherited env
         for (auto& entry : params.env_entries) {
             auto eq = entry.find('=');
             if (eq != std::string::npos)

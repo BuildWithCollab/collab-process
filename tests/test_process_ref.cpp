@@ -68,7 +68,8 @@ TEST_CASE("process_ref: kill() terminates a running process", "[process_ref]") {
     ProcessRef ref(pid);
     CHECK(ref.kill());
 
-    std::this_thread::sleep_for(200ms);
+    // CI runners may be slow to reap — give it time
+    std::this_thread::sleep_for(1000ms);
     CHECK_FALSE(ref.is_alive());
 }
 

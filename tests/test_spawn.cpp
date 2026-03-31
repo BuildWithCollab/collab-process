@@ -247,8 +247,8 @@ TEST_CASE("spawn: destructor kills a running process (RAII)", "[spawn]") {
         // proc goes out of scope here — destructor should kill
     }
 
-    // Give OS a moment to reap
-    std::this_thread::sleep_for(200ms);
+    // CI runners may be slow to reap — give it time
+    std::this_thread::sleep_for(500ms);
     ProcessRef ref(pid);
     CHECK_FALSE(ref.is_alive());
 }
@@ -268,7 +268,7 @@ TEST_CASE("spawn: kill() immediately terminates a running process", "[spawn]") {
 
     CHECK(proc->kill());
 
-    // Give OS a moment to reap
-    std::this_thread::sleep_for(100ms);
+    // CI runners may be slow to reap — give it time
+    std::this_thread::sleep_for(500ms);
     CHECK_FALSE(proc->is_alive());
 }

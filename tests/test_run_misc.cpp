@@ -32,13 +32,14 @@ TEST_CASE("run: working_dir changes the child's working directory", "[run][worki
 
     auto result = collab::process::run(config);
     REQUIRE(result.has_value());
-    CHECK(result->ok());
+    REQUIRE(result->ok());
 
-    // Normalize both paths for comparison
+    // Normalize both to canonical form for comparison.
+    // On macOS, temp_directory_path() may be a symlink (/var → /private/var).
     auto expected = fs::canonical(temp_dir).string();
-    auto actual = result->stdout_content;
-    // On Windows, canonical may differ in case or trailing slash — compare canonical forms
-    auto actual_canonical = fs::canonical(fs::path(actual)).string();
+    auto actual_path = fs::path(result->stdout_content);
+    REQUIRE_FALSE(result->stdout_content.empty());
+    auto actual_canonical = fs::canonical(actual_path).string();
     CHECK(actual_canonical == expected);
 }
 

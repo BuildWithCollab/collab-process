@@ -190,9 +190,10 @@ TEST_CASE("command: working_directory() changes cwd", "[command][working_dir]") 
         .run();
 
     REQUIRE(result.has_value());
-    CHECK(result->ok());
+    REQUIRE(result->ok());
 
     auto expected = fs::canonical(temp_dir).string();
+    REQUIRE_FALSE(result->stdout_content.empty());
     auto actual_canonical = fs::canonical(fs::path(result->stdout_content)).string();
     CHECK(actual_canonical == expected);
 }
