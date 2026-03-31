@@ -326,7 +326,7 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 3. **Build env block** — copy parent (or start empty), apply add/remove. Child gets its own block; parent is never touched
 4. **Create pipes** — only for modes that need them
 5. **On Windows, interactive mode** (all streams inherit, not detached) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
-6. **Spawn** — `CreateProcessW` / `fork`+`execvp`. Job object (Windows) or process group (Unix) for tree kill
+6. **Spawn** — `CreateProcessW` / `fork`+`execve`. Job object (Windows) or process group (Unix) for tree kill
 7. **Concurrent I/O** — stdin writes in a background thread to prevent deadlock with stdout/stderr reading
 8. **Return** — `run()` waits + returns `Result`. `spawn()` returns `RunningProcess` immediately
 
