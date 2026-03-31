@@ -245,6 +245,15 @@ auto platform_spawn(SpawnParams params)
             if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
         }
 
+        // Resolve the program to an absolute path BEFORE chdir,
+        // otherwise a relative path would break after working_dir change.
+        std::string program_path = params.resolved_program.string();
+        if (program_path[0] != '/') {
+            // Make relative path absolute from current dir before chdir
+            auto abs = std::filesystem::absolute(params.resolved_program);
+            program_path = abs.string();
+        }
+
         // Working directory
         if (!params.working_dir.empty())
             (void)chdir(params.working_dir.c_str());
@@ -257,7 +266,7 @@ auto platform_spawn(SpawnParams params)
 
         // Build argv
         std::vector<const char*> argv;
-        argv.push_back(params.resolved_program.c_str());
+        argv.push_back(program_path.c_str());
         for (auto& a : params.args)
             argv.push_back(a.c_str());
         argv.push_back(nullptr);
@@ -265,13 +274,12 @@ auto platform_spawn(SpawnParams params)
         // Build envp from the prepared env_entries block.
         // Uses execve() instead of execvp() so env_remove/env_clear work —
         // the prepared block already has removals/clears applied.
-        // We have the resolved full path, so PATH search isn't needed.
         std::vector<const char*> envp;
         for (auto& entry : params.env_entries)
             envp.push_back(entry.c_str());
         envp.push_back(nullptr);
 
-        execve(params.resolved_program.c_str(),
+        execve(program_path.c_str(),
                const_cast<char* const*>(argv.data()),
                const_cast<char* const*>(envp.data()));
         _exit(127);
