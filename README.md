@@ -56,6 +56,8 @@ auto result = Command("git")
 
 ### xmake
 
+Add the [BuildWithCollab](https://github.com/BuildWithCollab/Packages) package registry and require `collab-process`:
+
 ```lua
 -- xmake.lua
 add_repositories("BuildWithCollab https://github.com/BuildWithCollab/Packages.git")
@@ -67,32 +69,48 @@ target("myapp")
 
 ### CMake / vcpkg
 
-Add the BuildWithCollab registry to your `vcpkg-configuration.json`:
+Custom registries for vcpkg are a bit more involved, but still easy to set up. You need two files in your project root.
+
+**`vcpkg-configuration.json`** — tells vcpkg where to find packages:
 
 ```json
 {
     "default-registry": {
         "kind": "git",
         "repository": "https://github.com/microsoft/vcpkg.git",
-        "baseline": "<vcpkg baseline hash>"
+        "baseline": "<latest-vcpkg-commit-hash>"
     },
     "registries": [
         {
             "kind": "git",
             "repository": "https://github.com/BuildWithCollab/Packages.git",
-            "baseline": "<latest commit hash from Packages repo>",
+            "baseline": "<latest-packages-commit-hash>",
             "packages": ["collab-process"]
         }
     ]
 }
 ```
 
-Then add `collab-process` to your `vcpkg.json` and use it in CMake:
+> To get the latest baseline: `git ls-remote https://github.com/BuildWithCollab/Packages.git HEAD`
+
+**`vcpkg.json`** — your project manifest:
+
+```json
+{
+    "name": "my-project",
+    "version-string": "0.0.1",
+    "dependencies": ["collab-process"]
+}
+```
+
+**`CMakeLists.txt`**:
 
 ```cmake
 find_package(collab-process CONFIG REQUIRED)
 target_link_libraries(myapp PRIVATE collab::collab-process)
 ```
+
+For more details on vcpkg setup and updating baselines, see the [Packages registry README](https://github.com/BuildWithCollab/Packages).
 
 ### Then
 
