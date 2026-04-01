@@ -54,13 +54,19 @@ auto result = Command("git")
 
 ## Installation
 
+Packages are hosted on the [BuildWithCollab/Packages](https://github.com/BuildWithCollab/Packages) registry.
+
 ### xmake
 
-Add the [BuildWithCollab](https://github.com/BuildWithCollab/Packages) package registry and require `collab-process`:
+Add the package registry to your `xmake.lua` (one-time setup):
 
 ```lua
--- xmake.lua
 add_repositories("BuildWithCollab https://github.com/BuildWithCollab/Packages.git")
+```
+
+Then require and use the package:
+
+```lua
 add_requires("collab-process")
 
 target("myapp")
@@ -69,9 +75,9 @@ target("myapp")
 
 ### CMake / vcpkg
 
-Custom registries for vcpkg are a bit more involved, but still easy to set up. You need two files in your project root.
+Custom registries for vcpkg are a bit more involved, but still easy to set up. You need two configuration files in your project root.
 
-**`vcpkg-configuration.json`** — tells vcpkg where to find packages:
+**`vcpkg-configuration.json`** — tells vcpkg where to find packages. A `baseline` is a git commit hash that determines which package versions are available:
 
 ```json
 {
@@ -85,13 +91,25 @@ Custom registries for vcpkg are a bit more involved, but still easy to set up. Y
             "kind": "git",
             "repository": "https://github.com/BuildWithCollab/Packages.git",
             "baseline": "<latest-packages-commit-hash>",
-            "packages": ["collab-process"]
+            "packages": ["collab-core", "collab-process"]
         }
     ]
 }
 ```
 
-> To get the latest baseline: `git ls-remote https://github.com/BuildWithCollab/Packages.git HEAD`
+> `collab-core` must be listed in `packages` — it's a transitive dependency.
+
+To get the latest baselines:
+
+```bash
+# BuildWithCollab registry
+git ls-remote https://github.com/BuildWithCollab/Packages.git HEAD
+
+# Microsoft vcpkg registry
+git ls-remote https://github.com/microsoft/vcpkg.git HEAD
+```
+
+> When the registry is updated with new versions, you'll need to update the baseline to see them.
 
 **`vcpkg.json`** — your project manifest:
 
@@ -103,6 +121,8 @@ Custom registries for vcpkg are a bit more involved, but still easy to set up. Y
 }
 ```
 
+> The `name` and `version-string` fields just need to be valid — they can be anything. `name` must be all lowercase letters, numbers, and hyphens.
+
 **`CMakeLists.txt`**:
 
 ```cmake
@@ -110,7 +130,7 @@ find_package(collab-process CONFIG REQUIRED)
 target_link_libraries(myapp PRIVATE collab::collab-process)
 ```
 
-For more details on vcpkg setup and updating baselines, see the [Packages registry README](https://github.com/BuildWithCollab/Packages).
+For more details, see the [Packages registry README](https://github.com/BuildWithCollab/Packages).
 
 ### Then
 
