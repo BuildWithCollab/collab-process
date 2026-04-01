@@ -71,6 +71,11 @@ Add the BuildWithCollab registry to your `vcpkg-configuration.json`:
 
 ```json
 {
+    "default-registry": {
+        "kind": "git",
+        "repository": "https://github.com/microsoft/vcpkg.git",
+        "baseline": "<vcpkg baseline hash>"
+    },
     "registries": [
         {
             "kind": "git",
