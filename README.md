@@ -5,6 +5,9 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Installation](#installation)
+  - [xmake](#xmake)
+  - [CMake / vcpkg](#cmake--vcpkg)
 - [Two Paths, One Engine](#two-paths-one-engine)
 - [API Reference](#api-reference)
   - [CommandConfig](#commandconfig)
@@ -47,6 +50,49 @@ auto result = Command("git")
     .args({"status", "--porcelain"})
     .stdout_capture()
     .run();
+```
+
+## Installation
+
+### xmake
+
+```lua
+-- xmake.lua
+add_repositories("BuildWithCollab https://github.com/BuildWithCollab/Packages.git")
+add_requires("collab-process")
+
+target("myapp")
+    add_packages("collab-process")
+```
+
+### CMake / vcpkg
+
+Add the BuildWithCollab registry to your `vcpkg-configuration.json`:
+
+```json
+{
+    "registries": [
+        {
+            "kind": "git",
+            "repository": "https://github.com/BuildWithCollab/Packages.git",
+            "baseline": "<latest commit hash from Packages repo>",
+            "packages": ["collab-process"]
+        }
+    ]
+}
+```
+
+Then add `collab-process` to your `vcpkg.json` and use it in CMake:
+
+```cmake
+find_package(collab-process CONFIG REQUIRED)
+target_link_libraries(myapp PRIVATE collab::collab-process)
+```
+
+### Then
+
+```cpp
+#include <collab/process.hpp>
 ```
 
 ## Two Paths, One Engine
@@ -341,20 +387,6 @@ Requires C++23. Uses [xmake](https://xmake.io).
 ```bash
 xmake -y
 xmake test -y
-```
-
-### As a dependency
-
-```lua
--- xmake.lua
-add_requires("collab-process")
-
-target("myapp")
-    add_packages("collab-process")
-```
-
-```cpp
-#include <collab/process.hpp>
 ```
 
 ## Testing
