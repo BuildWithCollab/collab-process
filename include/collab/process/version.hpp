@@ -4,6 +4,6 @@
 
 namespace collab::process {
 
-inline constexpr collab::Version version{1, 1, 0};
+inline constexpr collab::Version version{1, 1, 1};
 
 }  // namespace collab::process

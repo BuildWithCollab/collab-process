@@ -25,6 +25,36 @@ TEST_CASE("utilities: find_executable returns nullopt for bogus name", "[utiliti
     CHECK_FALSE(result.has_value());
 }
 
+TEST_CASE("utilities: find_executable does not match a directory", "[utilities]") {
+    // Create a temp dir named like a command on PATH
+    auto temp_dir = fs::temp_directory_path() / "find_exe_test_dir";
+    auto fake_cmd_dir = temp_dir / "fakecmd";
+    fs::create_directories(fake_cmd_dir);
+
+    // Prepend our temp dir to PATH so it's searched
+    auto old_path = std::getenv("PATH");
+    auto new_path = temp_dir.string()
+#ifdef _WIN32
+        + ";" + (old_path ? old_path : "");
+    _putenv_s("PATH", new_path.c_str());
+#else
+        + ":" + (old_path ? old_path : "");
+    setenv("PATH", new_path.c_str(), 1);
+#endif
+
+    // "fakecmd" exists on PATH but is a directory — should not match
+    auto result = find_executable("fakecmd");
+    CHECK_FALSE(result.has_value());
+
+    // Restore PATH and cleanup
+#ifdef _WIN32
+    _putenv_s("PATH", old_path ? old_path : "");
+#else
+    setenv("PATH", old_path ? old_path : "", 1);
+#endif
+    fs::remove_all(temp_dir);
+}
+
 TEST_CASE("utilities: find_executable finds test_helper by absolute path", "[utilities]") {
     auto dir = fs::path(TEST_BUILD_DIR);
 #ifdef _WIN32

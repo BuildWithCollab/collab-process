@@ -14,7 +14,7 @@ auto find_executable(std::string_view name) -> std::optional<fs::path> {
     // If it's already an absolute path or contains a separator, check directly
     auto as_path = fs::path{name};
     if (as_path.has_parent_path()) {
-        if (fs::exists(as_path))
+        if (fs::is_regular_file(as_path))
             return as_path;
         return std::nullopt;
     }
@@ -38,7 +38,7 @@ auto find_executable(std::string_view name) -> std::optional<fs::path> {
         if (dir.empty()) continue;
         for (auto& ext : extensions) {
             auto candidate = fs::path(dir) / (std::string(name) + ext);
-            if (fs::exists(candidate))
+            if (fs::is_regular_file(candidate))
                 return candidate;
         }
     }
