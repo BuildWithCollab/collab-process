@@ -10,10 +10,7 @@ includes("xmake/collab.lua")
 add_repositories("BuildWithCollab https://github.com/BuildWithCollab/Packages.git")
 
 -- Collab dependencies (local or registry, depending on env vars)
-add_collab_requires("collab-core")
-
--- External dependencies
-add_requires("fmt")
+add_collab_requires("collab-core", "dotenv")
 
 option("build_tests")
     set_default(true)
@@ -29,8 +26,7 @@ target("collab-process")
     set_kind("static")
     add_headerfiles("include/(**.hpp)")
     add_includedirs("include", { public = true })
-    add_packages("fmt", { public = true })
-    add_collab_packages("collab-core")
+    add_collab_packages("collab-core", "dotenv")
 
     -- Shared source files
     add_files("src/*.cpp")

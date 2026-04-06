@@ -39,6 +39,9 @@ struct CommandConfig {
     // Behavior
     std::chrono::milliseconds timeout{0};  // 0 = no timeout
     bool detached = false;                 // child survives parent
+
+    // Dotenv — load .env files into the child's environment
+    bool dotenv = false;                   // false = no .env loading
 };
 
 struct IoCallbacks {

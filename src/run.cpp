@@ -4,10 +4,34 @@
 #include "platform.hpp"
 #include "running_process_impl.hpp"
 
+#include <dotenv/load.hpp>
+
 namespace collab::process {
+
+// When dotenv is enabled, load .env files and prepend vars to env_add.
+// Prepending means explicit env_add entries take precedence over .env values.
+static void apply_dotenv(CommandConfig& config) {
+    if (!config.dotenv) return;
+
+    auto from = config.working_dir.empty()
+        ? std::filesystem::current_path()
+        : config.working_dir;
+
+    auto vars = dotenv::load(from);
+
+    std::vector<std::pair<std::string, std::string>> combined;
+    combined.reserve(vars.size() + config.env_add.size());
+    for (auto& var : vars)
+        combined.emplace_back(std::move(var.key), std::move(var.value));
+    for (auto& pair : config.env_add)
+        combined.push_back(std::move(pair));
+    config.env_add = std::move(combined);
+}
 
 auto run(CommandConfig config, IoCallbacks callbacks)
     -> std::expected<Result, SpawnError> {
+    apply_dotenv(config);
+
     // Resolve the program
     auto resolved = find_executable(config.program);
     if (!resolved)
@@ -61,6 +85,8 @@ auto run(CommandConfig config, IoCallbacks callbacks)
 
 auto spawn(CommandConfig config, IoCallbacks callbacks)
     -> std::expected<RunningProcess, SpawnError> {
+    apply_dotenv(config);
+
     // Resolve the program
     auto resolved = find_executable(config.program);
     if (!resolved)

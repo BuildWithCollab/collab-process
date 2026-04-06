@@ -91,13 +91,13 @@ Custom registries for vcpkg are a bit more involved, but still easy to set up. Y
             "kind": "git",
             "repository": "https://github.com/BuildWithCollab/Packages.git",
             "baseline": "<latest-packages-commit-hash>",
-            "packages": ["collab-core", "collab-process"]
+            "packages": ["collab-core", "collab-process", "dotenv"]
         }
     ]
 }
 ```
 
-> `collab-core` must be listed in `packages` — it's a transitive dependency.
+> `collab-core` and `dotenv` must be listed in `packages` — they're transitive dependencies.
 
 To get the latest baselines:
 
@@ -179,6 +179,7 @@ struct CommandConfig {
     // Behavior
     std::chrono::milliseconds timeout{0}; // 0 = no timeout
     bool detached = false;                // child survives parent
+    bool dotenv = false;                  // load .env files into child env
 };
 ```
 
@@ -361,7 +362,7 @@ auto result = std::move(cmd).run();
 | **Stdin** | `stdin_string(content)`, `stdin_file(path)`, `stdin_close()`, `stdin_inherit()` |
 | **Stdout** | `stdout_capture()`, `stdout_inherit()`, `stdout_discard()`, `stdout_callback(fn)` |
 | **Stderr** | `stderr_capture()`, `stderr_inherit()`, `stderr_discard()`, `stderr_merge()`, `stderr_callback(fn)` |
-| **Behavior** | `timeout(ms)`, `detached()` |
+| **Behavior** | `timeout(ms)`, `detached()`, `dotenv()` |
 | **Execute** | `run()` → `expected<Result>`, `spawn()` → `expected<RunningProcess>`, `spawn_detached()` → `expected<int>` |
 
 ### Free Functions
@@ -409,19 +410,21 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 | env | copy parent | Apply additions/removals on top |
 | timeout | none | No timeout unless set |
 | detached | false | Child in caller's process group |
+| dotenv | false | No .env file loading |
 
 `CommandConfig{}` with just a `program` set behaves like running the command in your terminal. Capture is opt-in.
 
 ## What Happens Internally
 
-1. **Resolve the program** — walk PATH, find full path
-2. **On Windows: MZ check** — read 2 bytes. `MZ` → `CreateProcessW` directly. Not `MZ` → wrap with `cmd /c`
-3. **Build env block** — copy parent (or start empty), apply add/remove. Child gets its own block; parent is never touched
-4. **Create pipes** — only for modes that need them
-5. **On Windows, interactive mode** (all streams inherit, not detached) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
-6. **Spawn** — `CreateProcessW` / `fork`+`execve`. Job object (Windows) or process group (Unix) for tree kill
-7. **Concurrent I/O** — stdin writes in a background thread to prevent deadlock with stdout/stderr reading
-8. **Return** — `run()` waits + returns `Result`. `spawn()` returns `RunningProcess` immediately
+1. **Load .env files** (if `dotenv == true`) — walk from `working_dir` (or cwd) to root, load all `.env` / `.env.yaml` / `.env.json` files, merge and expand `${VAR}` references. Vars are prepended to `env_add` so explicit entries take precedence. Uses [dotenv](https://github.com/BuildWithCollab/dotenv).
+2. **Resolve the program** — walk PATH, find full path
+3. **On Windows: MZ check** — read 2 bytes. `MZ` → `CreateProcessW` directly. Not `MZ` → wrap with `cmd /c`
+4. **Build env block** — copy parent (or start empty), apply add/remove. Child gets its own block; parent is never touched
+5. **Create pipes** — only for modes that need them
+6. **On Windows, interactive mode** (all streams inherit, not detached) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
+7. **Spawn** — `CreateProcessW` / `fork`+`execve`. Job object (Windows) or process group (Unix) for tree kill
+8. **Concurrent I/O** — stdin writes in a background thread to prevent deadlock with stdout/stderr reading
+9. **Return** — `run()` waits + returns `Result`. `spawn()` returns `RunningProcess` immediately
 
 ## Building
 
@@ -445,4 +448,5 @@ xmake run collab-process-tests "[utilities]"           # just the utility tests
 xmake run collab-process-tests "[callbacks]"           # just the I/O callback tests
 xmake run collab-process-tests "[errors]"              # just the error handling tests
 xmake run collab-process-tests "[process_ref]"         # just the ProcessRef tests
+xmake run collab-process-tests "[dotenv]"              # just the dotenv integration tests
 ```

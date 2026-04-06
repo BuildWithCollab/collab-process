@@ -163,6 +163,11 @@ public:
         return std::forward<decltype(self)>(self);
     }
 
+    auto dotenv(this auto&& self) -> decltype(auto) {
+        self.config_.dotenv = true;
+        return std::forward<decltype(self)>(self);
+    }
+
     // -- Execute (consumes the Command) --
 
     auto run(this Command&& self) -> std::expected<Result, SpawnError>;
