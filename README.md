@@ -20,6 +20,7 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
   - [Command (fluent builder)](#command-fluent-builder)
   - [Free Functions](#free-functions)
   - [Utilities](#utilities)
+  - [Dotenv Integration](#dotenv-integration)
 - [Defaults](#defaults)
 - [What Happens Internally](#what-happens-internally)
 - [Building](#building)
@@ -399,6 +400,38 @@ auto is_pe_executable(const std::filesystem::path& path) -> bool;
 auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
     -> std::expected<std::filesystem::path, std::error_code>;
 ```
+
+### Dotenv Integration
+
+Load `.env` files into the child's environment. Uses [dotenv](https://github.com/BuildWithCollab/dotenv) — supports `.env`, `.env.yaml`, `.env.json`, hierarchical discovery (walks to root), and `${VAR}` expansion.
+
+```cpp
+// Fluent
+auto result = Command("myapp")
+    .dotenv()
+    .stdout_capture()
+    .run();
+
+// Struct
+CommandConfig config;
+config.program = "myapp";
+config.dotenv = true;
+auto result = run(config);
+```
+
+Dotenv vars are loaded from `working_dir` (or cwd if unset) and prepended to `env_add` — explicit `env_add` entries always take precedence over `.env` values.
+
+```cpp
+// .env has DATABASE_URL=from_file
+// Explicit env_add wins:
+auto result = Command("myapp")
+    .dotenv()
+    .env("DATABASE_URL", "from_config")
+    .run();
+// child sees DATABASE_URL=from_config
+```
+
+When `dotenv` is `false` (the default), no `.env` files are loaded and there is no overhead.
 
 ## Defaults
 
