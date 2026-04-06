@@ -2,14 +2,17 @@
     "default-registry": {
         "kind": "git",
         "repository": "https://github.com/microsoft/vcpkg.git",
-        "baseline": "4af038c8a39b5873aa2f89c5dec0d5cd021a5112"
+        "baseline": "1765cad8e278cf360209361045ee510d2b329f11"
     },
     "registries": [
         {
             "kind": "git",
             "repository": "https://github.com/BuildWithCollab/Packages.git",
-            "baseline": "12a9457825d99fb7285889b8134c3272370536f6",
-            "packages": ["collab-core", "collab-process"]
+            "baseline": "1c8e25d3d992d3eb18fa2ad540b985497b641f7c",
+            "packages": [
+                "collab-core",
+                "collab-process"
+            ]
         }
     ]
 }
