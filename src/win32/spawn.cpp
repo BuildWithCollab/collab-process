@@ -271,7 +271,13 @@ static auto build_command_line(bool needs_cmd_wrapper,
     std::wostringstream cmd;
 
     if (needs_cmd_wrapper) {
-        cmd << L"cmd /c ";
+        // cmd /c has special quoting: the entire command after /c must be
+        // wrapped in one outer pair of quotes. cmd strips the first and last
+        // quote characters, leaving the inner command intact.
+        // Without this, cmd misparses the first " in the program path as the
+        // start of a single token that extends to the next " it finds — which
+        // could be inside an argument, breaking everything.
+        cmd << L"cmd /c \"";
     }
 
     // Quote the program path
@@ -294,6 +300,10 @@ static auto build_command_line(bool needs_cmd_wrapper,
         } else {
             cmd << wa;
         }
+    }
+
+    if (needs_cmd_wrapper) {
+        cmd << L"\"";
     }
 
     return cmd.str();
