@@ -10,13 +10,70 @@
 //   test_helper sleep <seconds>     Sleep then exit 0
 //   test_helper cwd                 Print current working directory
 //   test_helper flood <bytes>       Write N bytes to stdout (for deadlock tests)
+//   test_helper sigint-exit         Install SIGINT handler: print GOT_SIGINT, exit 42
+//   test_helper sigint-ignore       Install SIGINT handler: print GOT_SIGINT, keep running
+//   test_helper sigint-default      No handler — default SIGINT action
 
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
 #include <thread>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <io.h>
+#define WRITE_STDOUT(buf, n) _write(1, buf, static_cast<unsigned int>(n))
+#else
+#include <unistd.h>
+#define WRITE_STDOUT(buf, n) ::write(STDOUT_FILENO, buf, n)
+#endif
+
+namespace {
+
+constexpr char kGotSigint[] = "GOT_SIGINT";
+
+void print_got_sigint() {
+    // Async-signal-safe write (iostream is not safe from a handler)
+    WRITE_STDOUT(kGotSigint, sizeof(kGotSigint) - 1);
+}
+
+#ifdef _WIN32
+BOOL WINAPI sigint_exit_handler(DWORD type) {
+    if (type == CTRL_C_EVENT) {
+        print_got_sigint();
+        std::_Exit(42);
+    }
+    return FALSE;
+}
+
+BOOL WINAPI sigint_ignore_handler(DWORD type) {
+    if (type == CTRL_C_EVENT) {
+        print_got_sigint();
+        return TRUE;  // handled — don't terminate
+    }
+    return FALSE;
+}
+#else
+volatile std::sig_atomic_t got_sigint = 0;
+
+void sigint_exit_sig_handler(int) {
+    print_got_sigint();
+    std::_Exit(42);
+}
+
+void sigint_ignore_sig_handler(int) {
+    print_got_sigint();
+    got_sigint = 1;
+}
+#endif
+
+}  // namespace
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -81,6 +138,33 @@ int main(int argc, char* argv[]) {
             written += to_write;
         }
         return 0;
+    }
+
+    if (mode == "sigint-exit") {
+#ifdef _WIN32
+        SetConsoleCtrlHandler(sigint_exit_handler, TRUE);
+#else
+        std::signal(SIGINT, sigint_exit_sig_handler);
+#endif
+        // Signal readiness, then park waiting for the signal.
+        std::cout << "READY" << std::flush;
+        for (;;) std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
+
+    if (mode == "sigint-ignore") {
+#ifdef _WIN32
+        SetConsoleCtrlHandler(sigint_ignore_handler, TRUE);
+#else
+        std::signal(SIGINT, sigint_ignore_sig_handler);
+#endif
+        std::cout << "READY" << std::flush;
+        for (;;) std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
+
+    if (mode == "sigint-default") {
+        // No handler installed — default SIGINT action (terminate).
+        std::cout << "READY" << std::flush;
+        for (;;) std::this_thread::sleep_for(std::chrono::milliseconds{100});
     }
 
     std::cerr << "unknown mode: " << mode << std::endl;

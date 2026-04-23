@@ -31,6 +31,8 @@ auto RunningProcess::stop(std::chrono::milliseconds grace) -> StopResult {
 
 auto RunningProcess::kill() -> bool { return impl_->kill(); }
 
+auto RunningProcess::interrupt() -> bool { return impl_->interrupt(); }
+
 auto RunningProcess::detach(this RunningProcess&& self) -> int {
     int pid = self.impl_->pid();
     self.impl_->release_for_detach();  // platform cleanup (e.g., remove kill-on-close job)

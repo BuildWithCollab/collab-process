@@ -23,6 +23,7 @@ struct RunningProcess::Impl {
     virtual auto wait_for_and_kill(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError> = 0;
     virtual auto stop(std::chrono::milliseconds grace) -> StopResult = 0;
     virtual auto kill() -> bool = 0;
+    virtual auto interrupt() -> bool = 0;
     virtual void release_for_detach() {}  // platform-specific cleanup before detach
 };
 

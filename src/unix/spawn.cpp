@@ -177,6 +177,11 @@ struct UnixProcessImpl : RunningProcess::Impl {
         waitpid(child_pid, nullptr, 0);
         return true;
     }
+
+    auto interrupt() -> bool override {
+        // TODO: implement — send SIGINT to the process group
+        return false;
+    }
 };
 
 auto platform_spawn(SpawnParams params)

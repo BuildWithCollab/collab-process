@@ -252,6 +252,11 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         return TerminateProcess(process_handle, 1) != 0;
     }
 
+    auto interrupt() -> bool override {
+        // TODO: implement — ConPTY-based Ctrl+C delivery
+        return false;
+    }
+
     void release_for_detach() override {
         // Remove the kill-on-close flag so closing the job handle
         // doesn't kill the child process.

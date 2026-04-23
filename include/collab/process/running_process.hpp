@@ -35,6 +35,11 @@ public:
     // Immediate tree kill.
     auto kill() -> bool;
 
+    // Send SIGINT (Unix) / CTRL_C_EVENT (Windows) to the child.
+    // Cooperative: the child may install a handler to catch or ignore.
+    // Returns false if the process is not alive or the signal could not be sent.
+    auto interrupt() -> bool;
+
     // Release ownership — child survives. Returns PID for reconnection
     // via ProcessRef. Consumes the RunningProcess (&&-qualified).
     auto detach(this RunningProcess&& self) -> int;
