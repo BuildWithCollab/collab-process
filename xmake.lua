@@ -19,7 +19,7 @@ option("build_tests")
 option_end()
 
 if get_config("build_tests") then
-    add_requires("catch2 3.x")
+    add_requires("catch2")
 end
 
 target("collab-process")
