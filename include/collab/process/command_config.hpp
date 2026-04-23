@@ -42,6 +42,14 @@ struct CommandConfig {
 
     // Dotenv — load .env files into the child's environment
     bool dotenv = false;                   // false = no .env loading
+
+    // Interruptible — opt in to a spawn path that supports interrupt() (Ctrl+C).
+    // Windows: spawns the child under a ConPTY so a real CTRL_C_EVENT can be
+    //   delivered by writing 0x03 to the console's input. Because ConPTY is a
+    //   terminal, stdout and stderr are combined into a single stream — all
+    //   captured output lands in Result::stdout_content, stderr_content is empty.
+    // Unix: no-op. interrupt() works via killpg regardless.
+    bool interruptible = false;
 };
 
 struct IoCallbacks {

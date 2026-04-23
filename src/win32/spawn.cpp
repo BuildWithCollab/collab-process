@@ -13,6 +13,12 @@ namespace collab::process::detail {
 
 void reset_console_for_interactive();  // console.cpp
 
+// ConPTY-backed spawn — used when params.interruptible is set. Defined in
+// src/win32/spawn_conpty.cpp. The child runs under a pseudoconsole so we can
+// deliver a real CTRL_C_EVENT by writing 0x03 to the console input.
+auto spawn_conpty(SpawnParams params)
+    -> std::expected<std::unique_ptr<RunningProcess::Impl>, SpawnError>;
+
 // Windows implementation of RunningProcess::Impl
 struct Win32ProcessImpl : RunningProcess::Impl {
     HANDLE process_handle = nullptr;
@@ -318,6 +324,12 @@ static auto build_env_block_wide(const std::vector<std::string>& entries) -> std
 
 auto platform_spawn(SpawnParams params)
     -> std::expected<std::unique_ptr<RunningProcess::Impl>, SpawnError> {
+
+    // Opt-in: route through the ConPTY implementation when the caller asked
+    // for an interruptible child. Everything else stays on the anon-pipe path
+    // so existing callers keep separate stdout/stderr capture.
+    if (params.interruptible)
+        return spawn_conpty(std::move(params));
 
     auto impl = std::make_unique<Win32ProcessImpl>();
     impl->on_stdout = std::move(params.on_stdout);

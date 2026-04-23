@@ -35,6 +35,7 @@ struct SpawnParams {
 
     // Behavior
     bool detached = false;
+    bool interruptible = false;      // use ConPTY path on Windows so interrupt() works
     bool needs_cmd_wrapper = false;  // Windows: resolved target is not a PE
 
     // Callbacks (moved in, not copied)

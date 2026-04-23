@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -44,6 +45,7 @@ auto spawn_ready(std::string mode)
     config.args = {std::move(mode)};
     config.stdout_mode = CommandConfig::OutputMode::capture;
     config.stderr_mode = CommandConfig::OutputMode::discard;
+    config.interruptible = true;
 
     IoCallbacks callbacks;
     callbacks.on_stdout = [state](std::string_view chunk) {
@@ -69,6 +71,78 @@ auto wait_for_ready(ReadyState& state,
 
 // ── 1. Child with handler — receives SIGINT, exits with known code ─
 
+TEST_CASE("conpty: cmd /c echo goes through pseudoconsole", "[interrupt]") {
+    CommandConfig config;
+    config.program = "cmd.exe";
+    config.args = {"/c", "echo", "HELLO_CONPTY"};
+    config.stdout_mode = CommandConfig::OutputMode::capture;
+    config.interruptible = true;
+
+    std::string captured;
+    std::mutex mtx;
+    IoCallbacks cb;
+    cb.on_stdout = [&](std::string_view chunk) {
+        std::lock_guard lock(mtx);
+        captured.append(chunk);
+    };
+
+    auto result = collab::process::run(std::move(config), std::move(cb));
+    REQUIRE(result.has_value());
+
+    std::lock_guard lock(mtx);
+    std::string hex;
+    for (unsigned char c : captured) {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%02x ", c);
+        hex += buf;
+    }
+    UNSCOPED_INFO("result.stdout_content=[" << result->stdout_content << "]");
+    UNSCOPED_INFO("captured " << captured.size() << " bytes hex: " << hex);
+    CHECK(captured.find("HELLO_CONPTY") != std::string::npos);
+}
+
+TEST_CASE("interrupt: diagnostic — wait works with kill", "[interrupt][diag]") {
+    auto [proc, state] = spawn_ready("sigint-exit");
+    REQUIRE(proc.has_value());
+    REQUIRE(wait_for_ready(*state));
+
+    // Use kill instead of interrupt to verify the wait path is OK.
+    CHECK(proc->kill());
+
+    auto result = proc->wait();
+    REQUIRE(result.has_value());
+    UNSCOPED_INFO("kill-path exit_code: "
+        << (result->exit_code ? std::to_string(*result->exit_code) : "nullopt"));
+}
+
+TEST_CASE("interrupt: diagnostic — stdin pipe reaches child", "[interrupt][diag]") {
+    // Confirm that bytes we write via interrupt()'s pipe actually reach child stdin.
+    // Spawn `test_helper stdin` which reads lines and echoes them.
+    CommandConfig config;
+    config.program = helper_path();
+    config.args = {"stdin"};
+    config.stdout_mode = CommandConfig::OutputMode::capture;
+    config.interruptible = true;
+    config.stdin_mode = CommandConfig::StdinMode::content;
+    config.stdin_content = "HELLO_STDIN\n";
+    config.timeout = std::chrono::milliseconds{3000};
+
+    std::string captured;
+    std::mutex mtx;
+    IoCallbacks cb;
+    cb.on_stdout = [&](std::string_view chunk) {
+        std::lock_guard lock(mtx);
+        captured.append(chunk);
+    };
+
+    auto result = collab::process::run(std::move(config), std::move(cb));
+    REQUIRE(result.has_value());
+
+    std::lock_guard lock(mtx);
+    UNSCOPED_INFO("captured: [" << captured << "]");
+    CHECK(captured.find("HELLO_STDIN") != std::string::npos);
+}
+
 TEST_CASE("interrupt: delivers signal to child with installed handler", "[interrupt]") {
     auto [proc, state] = spawn_ready("sigint-exit");
     REQUIRE(proc.has_value());
@@ -76,10 +150,19 @@ TEST_CASE("interrupt: delivers signal to child with installed handler", "[interr
 
     CHECK(proc->interrupt());
 
-    auto result = proc->wait();
-    REQUIRE(result.has_value());
-    CHECK(result->stdout_content.find("GOT_SIGINT") != std::string::npos);
-    CHECK(result->exit_code == 42);
+    // Poll for up to 3 seconds to let the handler fire and the child exit.
+    auto polled = proc->wait_for(3s);
+    if (!polled) {
+        // Still running — dump what we've captured so far, then clean up.
+        std::lock_guard lock(state->m);
+        UNSCOPED_INFO("post-interrupt still running — captured bytes: "
+            << state->captured.size()
+            << " content=[" << state->captured << "]");
+        proc->kill();
+        FAIL("child didn't exit within 3s after interrupt()");
+    }
+    CHECK(polled->stdout_content.find("GOT_SIGINT") != std::string::npos);
+    CHECK(polled->exit_code == 42);
 }
 
 // ── 2. Child with default handler — terminated by interrupt ─────────

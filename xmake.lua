@@ -44,3 +44,16 @@ target("collab-process")
 if get_config("build_tests") then
     includes("tests/xmake.lua")
 end
+
+-- Diagnostic: standalone ConPTY smoke test
+if is_plat("windows") then
+    target("conpty_repro")
+        set_kind("binary")
+        set_languages("c++23")
+        add_files("conpty_repro.cpp")
+
+    target("echocon_exact")
+        set_kind("binary")
+        set_languages("c++23")
+        add_files("echocon_exact.cpp")
+end
