@@ -2,9 +2,12 @@
 
 #include <collab/process.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace fs = std::filesystem;
 using namespace collab::process;
@@ -125,6 +128,117 @@ TEST_CASE("callbacks: on_stdout handles large output without deadlock", "[callba
 
     std::lock_guard lock(mtx);
     CHECK(total_bytes >= 500000);
+}
+
+// ── live streaming via spawn() ─────────────────────────────────
+//
+// The README promises IoCallbacks "Fire on the I/O thread as data arrives."
+// This test verifies that contract for spawn() — we never call wait() or
+// wait_for(), yet the callback must fire.
+
+TEST_CASE("callbacks: on_stdout fires live for spawn() without wait", "[callbacks][spawn]") {
+    using namespace std::chrono_literals;
+
+    std::mutex mtx;
+    std::string received;
+    std::atomic<int> chunks{0};
+
+    auto proc = Command(helper_path())
+        .args({"echo", "live_streamed"})
+        .stdout_capture()
+        .stdout_callback([&](std::string_view chunk) {
+            std::lock_guard lock(mtx);
+            received += chunk;
+            chunks.fetch_add(1);
+        })
+        .stderr_discard()
+        .spawn();
+
+    REQUIRE(proc.has_value());
+
+    auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (chunks.load() > 0) break;
+        std::this_thread::sleep_for(20ms);
+    }
+
+    REQUIRE(chunks.load() > 0);
+
+    std::lock_guard lock(mtx);
+    CHECK(received.find("live_streamed") != std::string::npos);
+}
+
+TEST_CASE("callbacks: on_stderr fires live for spawn() without wait", "[callbacks][spawn]") {
+    using namespace std::chrono_literals;
+
+    std::mutex mtx;
+    std::string received;
+    std::atomic<int> chunks{0};
+
+    auto proc = Command(helper_path())
+        .args({"stderr", "live_err"})
+        .stdout_discard()
+        .stderr_capture()
+        .stderr_callback([&](std::string_view chunk) {
+            std::lock_guard lock(mtx);
+            received += chunk;
+            chunks.fetch_add(1);
+        })
+        .spawn();
+
+    REQUIRE(proc.has_value());
+
+    auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (chunks.load() > 0) break;
+        std::this_thread::sleep_for(20ms);
+    }
+
+    REQUIRE(chunks.load() > 0);
+
+    std::lock_guard lock(mtx);
+    CHECK(received.find("live_err") != std::string::npos);
+}
+
+TEST_CASE("callbacks: both on_stdout and on_stderr fire live for spawn()", "[callbacks][spawn]") {
+    using namespace std::chrono_literals;
+
+    std::mutex mtx;
+    std::string out_received;
+    std::string err_received;
+    std::atomic<int> out_chunks{0};
+    std::atomic<int> err_chunks{0};
+
+    auto proc = Command(helper_path())
+        .args({"both", "LIVE_OUT", "LIVE_ERR"})
+        .stdout_capture()
+        .stderr_capture()
+        .stdout_callback([&](std::string_view chunk) {
+            std::lock_guard lock(mtx);
+            out_received += chunk;
+            out_chunks.fetch_add(1);
+        })
+        .stderr_callback([&](std::string_view chunk) {
+            std::lock_guard lock(mtx);
+            err_received += chunk;
+            err_chunks.fetch_add(1);
+        })
+        .spawn();
+
+    REQUIRE(proc.has_value());
+
+    auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (out_chunks.load() > 0 && err_chunks.load() > 0) break;
+        std::this_thread::sleep_for(20ms);
+    }
+
+    REQUIRE(out_chunks.load() > 0);
+    REQUIRE(err_chunks.load() > 0);
+
+    std::lock_guard lock(mtx);
+    CHECK(out_received.find("LIVE_OUT") != std::string::npos);
+    CHECK(err_received.find("LIVE_ERR") != std::string::npos);
 }
 
 // ── no callback is fine ────────────────────────────────────────

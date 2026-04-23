@@ -34,6 +34,12 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     // Stdin writer thread — joined before reading pipes or destroying
     std::thread stdin_thread;
 
+    // Background pipe reader — started at spawn time when we own at least
+    // one read pipe. Fires on_stdout/on_stderr callbacks live and appends
+    // to stdout_content / stderr_content as data arrives, so users can
+    // observe output from a spawn()ed process without calling wait().
+    std::thread pipe_reader_thread;
+
     // Callbacks
     collab::process::move_only_function<void(std::string_view)> on_stdout;
     collab::process::move_only_function<void(std::string_view)> on_stderr;
@@ -48,9 +54,17 @@ struct Win32ProcessImpl : RunningProcess::Impl {
             stdin_thread.join();
     }
 
+    void join_pipe_reader() {
+        if (pipe_reader_thread.joinable())
+            pipe_reader_thread.join();
+    }
+
     ~Win32ProcessImpl() override {
-        // Ensure stdin writer has finished before closing handles
+        // Ensure I/O threads have finished before closing handles — the
+        // reader's ReadFile must complete (via EOF when the process exits
+        // or cancellation in release_for_detach) before we tear down.
         join_stdin_thread();
+        join_pipe_reader();
         if (stdout_read) CloseHandle(stdout_read);
         if (stderr_read) CloseHandle(stderr_read);
         if (process_handle) CloseHandle(process_handle);
@@ -100,8 +114,10 @@ struct Win32ProcessImpl : RunningProcess::Impl {
 
         if (!waited) {
             join_stdin_thread();
-            read_pipes();
             WaitForSingleObject(process_handle, INFINITE);
+            // Reader thread (if any) exits once the child closes its
+            // write-ends of the pipes, which happens on process exit.
+            join_pipe_reader();
             waited = true;
         }
 
@@ -137,9 +153,9 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         if (wait_result == WAIT_TIMEOUT)
             return std::nullopt;
 
-        // Process exited — safe to drain pipes now
+        // Process exited — reader thread has seen / will imminently see EOF.
         if (!waited) {
-            read_pipes();
+            join_pipe_reader();
             waited = true;
         }
 
@@ -161,18 +177,12 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         };
     }
 
-    // Used by run() — reads pipes concurrently to avoid deadlock with
-    // processes that produce large output, and kills on timeout.
+    // Used by run() — kills the process on timeout. The background reader
+    // started at spawn time prevents deadlock when the child fills the
+    // pipe buffer (child blocks writing, parent blocks waiting).
     auto wait_for_and_kill(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError> override {
         if (!process_handle)
             return std::unexpected(SpawnError{SpawnError::platform_error, 0});
-
-        // Start pipe reader concurrently — prevents deadlock when the child
-        // fills the pipe buffer (child blocks writing, parent blocks waiting).
-        std::thread pipe_reader;
-        if (!waited) {
-            pipe_reader = std::thread([this] { read_pipes(); });
-        }
 
         DWORD wait_ms = static_cast<DWORD>(timeout.count());
         DWORD wait_result = WaitForSingleObject(process_handle, wait_ms);
@@ -185,10 +195,8 @@ struct Win32ProcessImpl : RunningProcess::Impl {
                 TerminateProcess(process_handle, 1);
             WaitForSingleObject(process_handle, 5000);
 
-            if (pipe_reader.joinable()) {
-                pipe_reader.join();
-                waited = true;
-            }
+            join_pipe_reader();
+            waited = true;
 
             auto trim = [](std::string& s) {
                 while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
@@ -206,10 +214,8 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         }
 
         // Process exited within timeout — pipe reader finishes naturally
-        if (pipe_reader.joinable()) {
-            pipe_reader.join();
-            waited = true;
-        }
+        join_pipe_reader();
+        waited = true;
 
         DWORD exit_code = 0;
         GetExitCodeProcess(process_handle, &exit_code);
@@ -263,6 +269,14 @@ struct Win32ProcessImpl : RunningProcess::Impl {
             // Clear the kill-on-close flag
             SetInformationJobObject(job_handle, JobObjectExtendedLimitInformation,
                                     &job_info, sizeof(job_info));
+        }
+        // The reader thread would otherwise block on ReadFile until the
+        // detached child closes its pipes — possibly never. Cancel pending
+        // reads so the thread can exit, then join before we return.
+        if (pipe_reader_thread.joinable()) {
+            if (stdout_read) CancelIoEx(stdout_read, nullptr);
+            if (stderr_read) CancelIoEx(stderr_read, nullptr);
+            pipe_reader_thread.join();
         }
     }
 };
@@ -519,6 +533,18 @@ auto platform_spawn(SpawnParams params)
     impl->process_id = static_cast<int>(pi.dwProcessId);
     impl->stdout_read = stdout_read_h;
     impl->stderr_read = stderr_read_h;
+
+    // Live pipe reader — fulfills the IoCallbacks contract that callbacks
+    // fire "as data arrives" (not "when wait() happens to drain"). Only
+    // start it when the child will actually write to one of our pipes:
+    // discard mode creates a pipe too but routes the child's stdout/stderr
+    // to NUL, so a reader would block on ReadFile forever.
+    bool needs_reader = (params.stdout_mode == CommandConfig::OutputMode::capture)
+                     || (params.stderr_mode == CommandConfig::OutputMode::capture);
+    if (needs_reader) {
+        Win32ProcessImpl* raw = impl.get();
+        impl->pipe_reader_thread = std::thread([raw] { raw->read_pipes(); });
+    }
 
     return impl;
 }

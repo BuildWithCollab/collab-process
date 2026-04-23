@@ -218,6 +218,18 @@ callbacks.on_stdout = [](std::string_view chunk) {
 auto result = run(config, std::move(callbacks));
 ```
 
+Callbacks also fire live for `spawn()` — the child doesn't have to exit first:
+
+```cpp
+auto proc = Command("tail").args({"-f", "/var/log/app.log"})
+    .stdout_capture()
+    .stdout_callback([](std::string_view chunk) {
+        process_stream(chunk);   // invoked as each read returns
+    })
+    .spawn();
+// callback fires as tail emits lines; no wait() required
+```
+
 Callbacks live outside `CommandConfig` so the config stays copyable.
 
 ### Result

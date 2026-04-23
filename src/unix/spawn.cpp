@@ -31,7 +31,21 @@ struct UnixProcessImpl : RunningProcess::Impl {
     bool waited = false;
     int cached_exit_code = -1;
 
+    // Background pipe reader — started at spawn when we actually own a
+    // capture pipe. Fires on_stdout/on_stderr live so a spawn()ed child's
+    // output streams without the caller having to call wait().
+    std::thread pipe_reader_thread;
+
+    void join_pipe_reader() {
+        if (pipe_reader_thread.joinable())
+            pipe_reader_thread.join();
+    }
+
     ~UnixProcessImpl() override {
+        // Reader must finish before we close the fds it's reading. The
+        // child closing its write-end (on exit or kill) is what unblocks
+        // the reader's read() with EOF.
+        join_pipe_reader();
         if (stdout_fd >= 0) close(stdout_fd);
         if (stderr_fd >= 0) close(stderr_fd);
     }
@@ -96,8 +110,9 @@ struct UnixProcessImpl : RunningProcess::Impl {
 
     auto wait() -> std::expected<Result, SpawnError> override {
         if (!waited) {
-            read_pipes();
             cached_exit_code = do_wait();
+            // Child exited → pipe write-ends closed → reader sees EOF → exits.
+            join_pipe_reader();
             waited = true;
         }
         return build_result();
@@ -112,7 +127,7 @@ struct UnixProcessImpl : RunningProcess::Impl {
             if (result != 0) {
                 cached_exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
                 if (!waited) {
-                    read_pipes();
+                    join_pipe_reader();
                     waited = true;
                 }
                 return build_result();
@@ -123,16 +138,10 @@ struct UnixProcessImpl : RunningProcess::Impl {
         return std::nullopt;
     }
 
-    // Used by run() — reads pipes concurrently to avoid deadlock with
-    // processes that produce large output, and kills on timeout.
+    // Used by run() — kills the process on timeout. The background reader
+    // started at spawn time prevents deadlock when the child fills the pipe
+    // buffer (child blocks writing, parent blocks waiting).
     auto wait_for_and_kill(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError> override {
-        // Start pipe reader concurrently — prevents deadlock when the child
-        // fills the pipe buffer (child blocks writing, parent blocks waiting).
-        std::thread pipe_reader;
-        if (!waited) {
-            pipe_reader = std::thread([this] { read_pipes(); });
-        }
-
         auto deadline = std::chrono::steady_clock::now() + timeout;
         bool exited = false;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -151,10 +160,8 @@ struct UnixProcessImpl : RunningProcess::Impl {
             waitpid(child_pid, nullptr, 0);
         }
 
-        if (pipe_reader.joinable()) {
-            pipe_reader.join();
-            waited = true;
-        }
+        join_pipe_reader();
+        waited = true;
 
         return build_result(!exited);
     }
@@ -177,6 +184,19 @@ struct UnixProcessImpl : RunningProcess::Impl {
         ::kill(target, SIGKILL);
         waitpid(child_pid, nullptr, 0);
         return true;
+    }
+
+    void release_for_detach() override {
+        // Reader would otherwise block in read() forever on a detached
+        // child's pipe. Close our read-side fds so the blocked read returns
+        // (typically with -1/EBADF on Linux — closing an fd from another
+        // thread while a read is pending is POSIX-UB but practically
+        // unblocks the read on mainstream kernels), then join.
+        if (pipe_reader_thread.joinable()) {
+            if (stdout_fd >= 0) { close(stdout_fd); stdout_fd = -1; }
+            if (stderr_fd >= 0) { close(stderr_fd); stderr_fd = -1; }
+            pipe_reader_thread.join();
+        }
     }
 };
 
@@ -324,6 +344,14 @@ auto platform_spawn(SpawnParams params)
     impl->child_pid = child;
     impl->stdout_fd = stdout_pipe[0];
     impl->stderr_fd = stderr_pipe[0];
+
+    // Live pipe reader — matches the IoCallbacks contract ("fire as data
+    // arrives"). On Unix the pipes exist only for capture mode (see above),
+    // so the fd-presence check is the correct signal.
+    if (impl->stdout_fd >= 0 || impl->stderr_fd >= 0) {
+        UnixProcessImpl* raw = impl.get();
+        impl->pipe_reader_thread = std::thread([raw] { raw->read_pipes(); });
+    }
 
     return impl;
 }
