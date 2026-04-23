@@ -14,7 +14,6 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
   - [IoCallbacks](#iocallbacks)
   - [Result](#result)
   - [SpawnError](#spawnerror)
-  - [StopResult](#stopresult)
   - [RunningProcess](#runningprocess)
   - [ProcessRef](#processref)
   - [Command (fluent builder)](#command-fluent-builder)
@@ -177,9 +176,19 @@ struct CommandConfig {
     std::string stdin_content;            // read when mode == content
     std::filesystem::path stdin_path;     // read when mode == file
 
+    // Process group — scopes signal delivery and tree kill.
+    // own: child is a process-group leader (Unix setpgid / Windows
+    //      CREATE_NEW_PROCESS_GROUP). Required on Windows for terminate().
+    enum class ProcessGroup { inherit, own };
+
+    // Session — Unix-only. new_session calls setsid() so the child
+    // detaches from the controlling terminal. No-op on Windows.
+    enum class Session { inherit, new_session };
+
     // Behavior
     std::chrono::milliseconds timeout{0}; // 0 = no timeout
-    bool detached = false;                // child survives parent
+    ProcessGroup process_group = ProcessGroup::inherit;
+    Session session = Session::inherit;
     bool dotenv = false;                  // load .env files into child env
 };
 ```
@@ -268,19 +277,6 @@ struct SpawnError {
 };
 ```
 
-### StopResult
-
-Returned by `RunningProcess::stop()` — tells you what actually happened.
-
-```cpp
-enum class StopResult {
-    stopped_gracefully,   // responded to SIGTERM / CTRL_BREAK
-    killed,               // had to escalate to SIGKILL / TerminateProcess
-    not_running,          // was already dead
-    failed                // couldn't stop it
-};
-```
-
 ### RunningProcess
 
 Move-only RAII handle returned by `spawn()`. Owns the job object (Windows) / process group (Unix) for tree operations. **Destructor kills the process** — like `jthread`, cleanup is automatic.
@@ -296,10 +292,13 @@ class RunningProcess {
     // Does NOT kill the process on timeout.
     auto wait_for(std::chrono::milliseconds timeout) -> std::optional<Result>;
 
-    // Graceful shutdown with escalation + tree kill
-    auto stop(std::chrono::milliseconds grace = 5s) -> StopResult;
-
-    // Immediate tree kill
+    // One-shot signal primitives. Each returns true iff the underlying
+    // syscall succeeded — no waiting, no escalation, no combined operations.
+    //   terminate(): SIGTERM / CTRL_BREAK_EVENT
+    //   interrupt(): SIGINT  / (always false on Windows)
+    //   kill():      SIGKILL / TerminateJobObject (tree kill)
+    auto terminate() -> bool;
+    auto interrupt() -> bool;
     auto kill() -> bool;
 
     // Release ownership — child survives destruction.
@@ -308,15 +307,21 @@ class RunningProcess {
 };
 ```
 
+Graceful shutdown is composition, not a single call — the three primitives
+give you the parts:
+
 ```cpp
 auto proc = spawn(config);
 if (!proc) return;
 
-// ... later ...
-auto stop_result = proc->stop(5s);
-if (stop_result == StopResult::killed)
-    log("had to force kill");
+proc->terminate();                     // ask nicely
+if (!proc->wait_for(5s).has_value())   // didn't exit in time
+    proc->kill();                      // escalate
 ```
+
+On Windows, `terminate()` requires the child was spawned with
+`own_process_group()` — CTRL_BREAK_EVENT has no group to target otherwise.
+`interrupt()` is Unix-only; it always returns `false` on Windows.
 
 ```cpp
 // Detach if the child should outlive this handle
@@ -375,7 +380,9 @@ auto result = std::move(cmd).run();
 | **Stdin** | `stdin_string(content)`, `stdin_file(path)`, `stdin_close()`, `stdin_inherit()` |
 | **Stdout** | `stdout_capture()`, `stdout_inherit()`, `stdout_discard()`, `stdout_callback(fn)` |
 | **Stderr** | `stderr_capture()`, `stderr_inherit()`, `stderr_discard()`, `stderr_merge()`, `stderr_callback(fn)` |
-| **Behavior** | `timeout(ms)`, `detached()`, `dotenv()` |
+| **Process group** | `process_group(mode)`, `own_process_group()`, `inherit_process_group()` |
+| **Session** (Unix) | `session(mode)`, `new_session()`, `inherit_session()` |
+| **Behavior** | `timeout(ms)`, `dotenv()` |
 | **Execute** | `run()` → `expected<Result>`, `spawn()` → `expected<RunningProcess>`, `spawn_detached()` → `expected<int>` |
 
 ### Dotenv Integration
@@ -454,7 +461,8 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 | stderr | inherit | Child errors to terminal |
 | env | copy parent | Apply additions/removals on top |
 | timeout | none | No timeout unless set |
-| detached | false | Child in caller's process group |
+| process_group | inherit | Child joins caller's process group |
+| session | inherit | Child stays in caller's session (Unix) |
 | dotenv | false | No .env file loading |
 
 `CommandConfig{}` with just a `program` set behaves like running the command in your terminal. Capture is opt-in.
@@ -466,7 +474,7 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 3. **On Windows: MZ check** — read 2 bytes. `MZ` → `CreateProcessW` directly. Not `MZ` → wrap with `cmd /c`
 4. **Build env block** — copy parent (or start empty), apply add/remove. Child gets its own block; parent is never touched
 5. **Create pipes** — only for modes that need them
-6. **On Windows, interactive mode** (all streams inherit, not detached) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
+6. **On Windows, interactive mode** (all streams inherit, `process_group == inherit`) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
 7. **Spawn** — `CreateProcessW` / `fork`+`execve`. Job object (Windows) or process group (Unix) for tree kill
 8. **Concurrent I/O** — stdin writes in a background thread to prevent deadlock with stdout/stderr reading
 9. **Return** — `run()` waits + returns `Result`. `spawn()` returns `RunningProcess` immediately
