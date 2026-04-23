@@ -36,9 +36,22 @@ struct CommandConfig {
     std::string stdin_content;           // read when mode == content
     std::filesystem::path stdin_path;    // read when mode == file
 
+    // Process group — controls signal-routing / tree-kill scoping.
+    // inherit: join the parent's process group (child receives the same
+    //   console-wide signals as the parent).
+    // own: child becomes a process-group leader (Unix setpgid / Windows
+    //   CREATE_NEW_PROCESS_GROUP). Required for group-scoped signal delivery.
+    enum class ProcessGroup { inherit, own };
+
+    // Session — Unix-only concept. Controls whether the child calls setsid()
+    // to become its own session leader (detaches from the controlling terminal).
+    // No-op on Windows.
+    enum class Session { inherit, new_session };
+
     // Behavior
     std::chrono::milliseconds timeout{0};  // 0 = no timeout
-    bool detached = false;                 // child survives parent
+    ProcessGroup process_group = ProcessGroup::inherit;
+    Session session = Session::inherit;
 
     // Dotenv — load .env files into the child's environment
     bool dotenv = false;                   // false = no .env loading

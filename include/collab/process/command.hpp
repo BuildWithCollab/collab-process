@@ -158,8 +158,33 @@ public:
         return std::forward<decltype(self)>(self);
     }
 
-    auto detached(this auto&& self) -> decltype(auto) {
-        self.config_.detached = true;
+    auto process_group(this auto&& self, CommandConfig::ProcessGroup group) -> decltype(auto) {
+        self.config_.process_group = group;
+        return std::forward<decltype(self)>(self);
+    }
+
+    auto own_process_group(this auto&& self) -> decltype(auto) {
+        self.config_.process_group = CommandConfig::ProcessGroup::own;
+        return std::forward<decltype(self)>(self);
+    }
+
+    auto inherit_process_group(this auto&& self) -> decltype(auto) {
+        self.config_.process_group = CommandConfig::ProcessGroup::inherit;
+        return std::forward<decltype(self)>(self);
+    }
+
+    auto session(this auto&& self, CommandConfig::Session s) -> decltype(auto) {
+        self.config_.session = s;
+        return std::forward<decltype(self)>(self);
+    }
+
+    auto new_session(this auto&& self) -> decltype(auto) {
+        self.config_.session = CommandConfig::Session::new_session;
+        return std::forward<decltype(self)>(self);
+    }
+
+    auto inherit_session(this auto&& self) -> decltype(auto) {
+        self.config_.session = CommandConfig::Session::inherit;
         return std::forward<decltype(self)>(self);
     }
 
@@ -173,6 +198,10 @@ public:
     auto run(this Command&& self) -> std::expected<Result, SpawnError>;
     auto spawn(this Command&& self) -> std::expected<RunningProcess, SpawnError>;
     auto spawn_detached(this Command&& self) -> std::expected<int, SpawnError>;
+
+    // -- Introspection (does not consume) --
+
+    auto config() const -> const CommandConfig& { return config_; }
 };
 
 }  // namespace collab::process

@@ -16,6 +16,13 @@ struct UnixProcessImpl : RunningProcess::Impl {
     int stdout_fd = -1;
     int stderr_fd = -1;
 
+    // Set before fork() from params.process_group. When true the child is
+    // a process-group leader, so terminate/interrupt/kill signal the whole
+    // group (negative pid). When false we must signal the pid directly —
+    // negating an arbitrary pid would target whatever group it belongs to
+    // (usually the parent's) and take us down with it.
+    bool has_own_group = false;
+
     collab::process::move_only_function<void(std::string_view)> on_stdout;
     collab::process::move_only_function<void(std::string_view)> on_stderr;
 
@@ -152,28 +159,22 @@ struct UnixProcessImpl : RunningProcess::Impl {
         return build_result(!exited);
     }
 
-    auto stop(std::chrono::milliseconds grace) -> StopResult override {
-        if (!is_alive()) return StopResult::not_running;
+    auto terminate() -> bool override {
+        if (!is_alive()) return false;
+        pid_t target = has_own_group ? -child_pid : child_pid;
+        return ::kill(target, SIGTERM) == 0;
+    }
 
-        // Signal the process group (negative PID) for tree kill
-        ::kill(-child_pid, SIGTERM);
-
-        auto deadline = std::chrono::steady_clock::now() + grace;
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (!is_alive()) return StopResult::stopped_gracefully;
-            std::this_thread::sleep_for(std::chrono::milliseconds{50});
-        }
-
-        // Escalate — kill entire process group
-        ::kill(-child_pid, SIGKILL);
-        waitpid(child_pid, nullptr, 0);
-        return StopResult::killed;
+    auto interrupt() -> bool override {
+        if (!is_alive()) return false;
+        pid_t target = has_own_group ? -child_pid : child_pid;
+        return ::kill(target, SIGINT) == 0;
     }
 
     auto kill() -> bool override {
         if (!is_alive()) return false;
-        // Kill entire process group
-        ::kill(-child_pid, SIGKILL);
+        pid_t target = has_own_group ? -child_pid : child_pid;
+        ::kill(target, SIGKILL);
         waitpid(child_pid, nullptr, 0);
         return true;
     }
@@ -185,6 +186,9 @@ auto platform_spawn(SpawnParams params)
     auto impl = std::make_unique<UnixProcessImpl>();
     impl->on_stdout = std::move(params.on_stdout);
     impl->on_stderr = std::move(params.on_stderr);
+    // Must match the setpgid() branch in the child below — terminate/kill
+    // consult this to decide between killpg (-pid) and a direct signal.
+    impl->has_own_group = (params.process_group == CommandConfig::ProcessGroup::own);
 
     // Stdin pipe
     int stdin_pipe[2] = {-1, -1};
@@ -258,10 +262,13 @@ auto platform_spawn(SpawnParams params)
         if (!params.working_dir.empty())
             (void)chdir(params.working_dir.c_str());
 
-        // Always create own process group — isolates child signals from parent
-        // and enables tree kill via killpg. setsid() for full detach.
-        setpgid(0, 0);
-        if (params.detached)
+        // Process-group setup — only if the caller asked for it. Joining the
+        // parent's process group is the default so interactive-inherit
+        // children behave like shell children (Ctrl+C routes naturally).
+        if (params.process_group == CommandConfig::ProcessGroup::own)
+            setpgid(0, 0);
+        // Session detach — Unix-only concept (no-op on Windows).
+        if (params.session == CommandConfig::Session::new_session)
             setsid();
 
         // Build argv

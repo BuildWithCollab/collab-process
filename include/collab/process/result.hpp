@@ -29,11 +29,4 @@ struct Result {
     auto ok() const -> bool { return exit_code == 0 && !timed_out; }
 };
 
-enum class StopResult {
-    stopped_gracefully,
-    killed,
-    not_running,
-    failed
-};
-
 }  // namespace collab::process

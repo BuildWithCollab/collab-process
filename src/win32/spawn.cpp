@@ -19,6 +19,14 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     HANDLE job_handle = nullptr;
     int process_id = 0;
 
+    // Set before CreateProcess, tracks whether CREATE_NEW_PROCESS_GROUP was
+    // applied. GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) only has a
+    // valid target when pid names a process-group leader, and Windows does
+    // *not* reliably return zero for non-leaders — the call can succeed
+    // while delivering the signal nowhere. Gate on this to get honest
+    // return values.
+    bool has_own_group = false;
+
     // Pipes for captured output
     HANDLE stdout_read = nullptr;
     HANDLE stderr_read = nullptr;
@@ -221,27 +229,22 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         };
     }
 
-    auto stop(std::chrono::milliseconds grace) -> StopResult override {
-        if (!is_alive()) return StopResult::not_running;
+    auto terminate() -> bool override {
+        if (!is_alive()) return false;
+        // CTRL_BREAK_EVENT's second parameter is a process-group ID. A pid
+        // only names a group when that process was spawned with
+        // CREATE_NEW_PROCESS_GROUP (process_group == own). Without that we
+        // have nothing meaningful to target — short-circuit to false.
+        if (!has_own_group) return false;
+        return GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
+                                        static_cast<DWORD>(process_id)) != 0;
+    }
 
-        // Send CTRL_BREAK to the process group
-        GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, process_id);
-
-        // Wait for grace period
-        DWORD wait_result = WaitForSingleObject(
-            process_handle, static_cast<DWORD>(grace.count()));
-
-        if (wait_result == WAIT_OBJECT_0)
-            return StopResult::stopped_gracefully;
-
-        // Escalate — terminate the job (tree kill)
-        if (job_handle)
-            TerminateJobObject(job_handle, 1);
-        else
-            TerminateProcess(process_handle, 1);
-
-        WaitForSingleObject(process_handle, 5000);
-        return StopResult::killed;
+    auto interrupt() -> bool override {
+        // No viable mapping on Windows — CTRL_C_EVENT broadcasts to the
+        // whole console (would hit the parent too) and is disabled for
+        // processes in a new process group per MSDN.
+        return false;
     }
 
     auto kill() -> bool override {
@@ -317,12 +320,16 @@ auto platform_spawn(SpawnParams params)
     auto impl = std::make_unique<Win32ProcessImpl>();
     impl->on_stdout = std::move(params.on_stdout);
     impl->on_stderr = std::move(params.on_stderr);
+    impl->has_own_group = (params.process_group == CommandConfig::ProcessGroup::own);
 
-    // Determine if interactive (all streams inherit, not detached)
+    // Determine if interactive (all streams inherit, shares parent's
+    // process group). A child with its own process group is excluded
+    // because the interactive console setup (Ctrl+C routing, foreground
+    // group tracking) assumes a shared group with the parent.
     bool is_interactive = (params.stdout_mode == CommandConfig::OutputMode::inherit)
         && (params.stderr_mode == CommandConfig::OutputMode::inherit)
         && (params.stdin_mode == CommandConfig::StdinMode::inherit)
-        && !params.detached;
+        && (params.process_group == CommandConfig::ProcessGroup::inherit);
 
     if (is_interactive)
         reset_console_for_interactive();
@@ -422,9 +429,14 @@ auto platform_spawn(SpawnParams params)
 
     // Creation flags
     DWORD flags = 0;
-    if (!is_interactive)
+    // CREATE_NO_WINDOW hides the child's console window — but it also
+    // effectively detaches the child's console enough that a parent
+    // GenerateConsoleCtrlEvent cannot reach it. If the caller asked for
+    // own_process_group they almost certainly want to deliver CTRL_BREAK
+    // later, so keep the shared console in that case.
+    if (!is_interactive && params.process_group != CommandConfig::ProcessGroup::own)
         flags |= CREATE_NO_WINDOW;
-    if (params.detached)
+    if (params.process_group == CommandConfig::ProcessGroup::own)
         flags |= CREATE_NEW_PROCESS_GROUP;
     flags |= CREATE_UNICODE_ENVIRONMENT;
 

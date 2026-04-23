@@ -34,7 +34,8 @@ struct SpawnParams {
     std::filesystem::path stdin_path;
 
     // Behavior
-    bool detached = false;
+    CommandConfig::ProcessGroup process_group = CommandConfig::ProcessGroup::inherit;
+    CommandConfig::Session session = CommandConfig::Session::inherit;
     bool needs_cmd_wrapper = false;  // Windows: resolved target is not a PE
 
     // Callbacks (moved in, not copied)

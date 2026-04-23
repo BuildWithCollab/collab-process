@@ -169,44 +169,6 @@ TEST_CASE("spawn: wait_for() returns nullopt when process is still running", "[s
     proc->kill();
 }
 
-// ── stop (graceful shutdown) ───────────────────────────────────
-
-TEST_CASE("spawn: stop() terminates a running process", "[spawn]") {
-    CommandConfig config;
-    config.program = helper_path();
-    config.args = {"sleep", "30"};
-    config.stdout_mode = CommandConfig::OutputMode::discard;
-    config.stderr_mode = CommandConfig::OutputMode::discard;
-
-    auto proc = collab::process::spawn(config);
-    REQUIRE(proc.has_value());
-    REQUIRE(proc->is_alive());
-
-    auto stop_result = proc->stop(2s);
-    CHECK((stop_result == StopResult::stopped_gracefully ||
-           stop_result == StopResult::killed));
-    CHECK_FALSE(proc->is_alive());
-}
-
-TEST_CASE("spawn: stop() on already-exited process returns not_running", "[spawn]") {
-    CommandConfig config;
-    config.program = helper_path();
-    config.args = {"exit", "0"};
-    config.stdout_mode = CommandConfig::OutputMode::discard;
-    config.stderr_mode = CommandConfig::OutputMode::discard;
-
-    auto proc = collab::process::spawn(config);
-    REQUIRE(proc.has_value());
-
-    // Wait for natural exit
-    [[maybe_unused]] auto _ = proc->wait();
-
-    auto stop_result = proc->stop();
-    CHECK(stop_result == StopResult::not_running);
-}
-
-// ── kill (immediate) ───────────────────────────────────────────
-
 // ── spawn_detached ─────────────────────────────────────────────
 
 TEST_CASE("spawn_detached: returns PID for a valid command", "[spawn_detached]") {
