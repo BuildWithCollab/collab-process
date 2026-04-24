@@ -79,11 +79,14 @@ TEST_CASE("utilities: is_pe_executable returns true for a real exe", "[utilities
 }
 
 TEST_CASE("utilities: is_pe_executable returns false for a text file", "[utilities][windows]") {
-    auto temp = write_temp_file("not an exe", "pe_test");
-    REQUIRE(temp.has_value());
+    auto path = fs::temp_directory_path() / "collab_pe_test.txt";
+    {
+        std::ofstream f(path, std::ios::binary);
+        f << "not an exe";
+    }
 
-    CHECK_FALSE(is_pe_executable(temp.value()));
-    fs::remove(temp.value());
+    CHECK_FALSE(is_pe_executable(path));
+    fs::remove(path);
 }
 
 TEST_CASE("utilities: is_pe_executable returns false for nonexistent file", "[utilities][windows]") {
@@ -99,55 +102,3 @@ TEST_CASE("utilities: is_pe_executable always returns false on non-Windows", "[u
 }
 
 #endif
-
-// ── write_temp_file ────────────────────────────────────────────
-
-TEST_CASE("utilities: write_temp_file creates a file with content", "[utilities]") {
-    auto result = write_temp_file("test content here", "wt_test");
-    REQUIRE(result.has_value());
-
-    auto path = result.value();
-    CHECK(fs::exists(path));
-
-    // Read it back — scope the ifstream so it closes before remove
-    {
-        std::ifstream in(path);
-        std::string content((std::istreambuf_iterator<char>(in)),
-                             std::istreambuf_iterator<char>());
-        CHECK(content == "test content here");
-    }
-
-    fs::remove(path);
-}
-
-TEST_CASE("utilities: write_temp_file uses the prefix in the filename", "[utilities]") {
-    auto result = write_temp_file("x", "myprefix");
-    REQUIRE(result.has_value());
-
-    auto filename = result.value().filename().string();
-    CHECK(filename.find("myprefix") != std::string::npos);
-
-    fs::remove(result.value());
-}
-
-TEST_CASE("utilities: write_temp_file creates unique files", "[utilities]") {
-    auto r1 = write_temp_file("one", "uniq");
-    auto r2 = write_temp_file("two", "uniq");
-    REQUIRE(r1.has_value());
-    REQUIRE(r2.has_value());
-
-    CHECK(r1.value() != r2.value());
-
-    fs::remove(r1.value());
-    fs::remove(r2.value());
-}
-
-TEST_CASE("utilities: write_temp_file with empty content", "[utilities]") {
-    auto result = write_temp_file("", "empty");
-    REQUIRE(result.has_value());
-
-    CHECK(fs::exists(result.value()));
-    CHECK(fs::file_size(result.value()) == 0);
-
-    fs::remove(result.value());
-}

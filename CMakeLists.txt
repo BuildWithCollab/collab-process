@@ -16,7 +16,6 @@ add_library(collab-process STATIC
     src/result.cpp
     src/run.cpp
     src/running_process.cpp
-    src/write_temp_file.cpp
 )
 
 if(WIN32)

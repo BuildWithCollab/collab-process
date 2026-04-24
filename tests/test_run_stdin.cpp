@@ -69,14 +69,17 @@ TEST_CASE("run: stdin_closed with stdin mode produces no output", "[run][stdin]"
 // ── stdin_path ─────────────────────────────────────────────────
 
 TEST_CASE("run: stdin_path pipes file contents to child", "[run][stdin]") {
-    auto temp = write_temp_file("file content here\n", "stdin_test");
-    REQUIRE(temp.has_value());
+    auto temp = fs::temp_directory_path() / "collab_stdin_test.txt";
+    {
+        std::ofstream f(temp, std::ios::binary);
+        f << "file content here\n";
+    }
 
     CommandConfig config;
     config.program = helper_path();
     config.args = {"stdin"};
     config.stdin_mode = CommandConfig::StdinMode::file;
-    config.stdin_path = temp.value();
+    config.stdin_path = temp;
     config.stdout_mode = CommandConfig::OutputMode::capture;
     config.stderr_mode = CommandConfig::OutputMode::discard;
 
@@ -85,7 +88,7 @@ TEST_CASE("run: stdin_path pipes file contents to child", "[run][stdin]") {
     CHECK(result->ok());
     CHECK(result->stdout_content.find("file content here") != std::string::npos);
 
-    fs::remove(temp.value());
+    fs::remove(temp);
 }
 
 // ── stdin_closed ───────────────────────────────────────────────
