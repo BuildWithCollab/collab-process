@@ -8,6 +8,18 @@
 
 namespace collab::process {
 
+// If any stream is redirected, the child is already detached enough from
+// the user's terminal that we should drive its signals from code. If every
+// stream inherits, the child is wired to the terminal and Ctrl+C should
+// reach it naturally — code-driven signalling is off. An explicit override
+// on the config wins over the inference.
+static bool resolve_signalable(const CommandConfig& config) {
+    if (config.signalable.has_value()) return *config.signalable;
+    return config.stdout_mode != CommandConfig::OutputMode::inherit
+        || config.stderr_mode != CommandConfig::OutputMode::inherit
+        || config.stdin_mode  != CommandConfig::StdinMode::inherit;
+}
+
 // When dotenv is enabled, load .env files and prepend vars to env_add.
 // Prepending means explicit env_add entries take precedence over .env values.
 static void apply_dotenv(CommandConfig& config) {
@@ -62,8 +74,7 @@ auto run(CommandConfig config, IoCallbacks callbacks)
         .stdin_mode = config.stdin_mode,
         .stdin_content = std::move(config.stdin_content),
         .stdin_path = std::move(config.stdin_path),
-        .process_group = config.process_group,
-        .session = config.session,
+        .signalable = resolve_signalable(config),
         .needs_cmd_wrapper = needs_cmd_wrapper,
         .on_stdout = std::move(callbacks.on_stdout),
         .on_stderr = std::move(callbacks.on_stderr),
@@ -115,8 +126,7 @@ auto spawn(CommandConfig config, IoCallbacks callbacks)
         .stdin_mode = config.stdin_mode,
         .stdin_content = std::move(config.stdin_content),
         .stdin_path = std::move(config.stdin_path),
-        .process_group = config.process_group,
-        .session = config.session,
+        .signalable = resolve_signalable(config),
         .needs_cmd_wrapper = needs_cmd_wrapper,
         .on_stdout = std::move(callbacks.on_stdout),
         .on_stderr = std::move(callbacks.on_stderr),

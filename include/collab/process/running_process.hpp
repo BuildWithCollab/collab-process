@@ -29,20 +29,14 @@ public:
 
     // Send a termination request. Returns true iff the syscall succeeded.
     // No waiting, no escalation — compose with wait_for()/kill() yourself.
-    //
-    //   Unix:    SIGTERM to the process or process group (depending on
-    //            CommandConfig::process_group).
-    //   Windows: GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT). Requires the
-    //            child was spawned with process_group == own; otherwise
-    //            fails and returns false.
+    // Only works when the child was spawned signalable (any redirected
+    // stream, or signalable(true) explicitly); returns false otherwise.
     auto terminate() -> bool;
 
     // Send an interrupt request. Returns true iff the syscall succeeded.
-    //
-    //   Unix:    SIGINT to the process or process group.
-    //   Windows: always returns false. CTRL_C_EVENT can only target the
-    //            whole console (would signal the parent) and is disabled
-    //            for processes spawned with CREATE_NEW_PROCESS_GROUP per MSDN.
+    // Unix-only: always returns false on Windows, where CTRL_C_EVENT can
+    // only target the whole console and is disabled for processes in a
+    // new process group per MSDN.
     auto interrupt() -> bool;
 
     // Immediate tree kill.

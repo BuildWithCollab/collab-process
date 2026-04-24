@@ -34,8 +34,11 @@ struct SpawnParams {
     std::filesystem::path stdin_path;
 
     // Behavior
-    CommandConfig::ProcessGroup process_group = CommandConfig::ProcessGroup::inherit;
-    CommandConfig::Session session = CommandConfig::Session::inherit;
+    //
+    // signalable: resolved from CommandConfig by the shared layer (explicit
+    // override if set, otherwise any-redirect inference). Drives isolation
+    // of the child into its own process group for code-driven signalling.
+    bool signalable = false;
     bool needs_cmd_wrapper = false;  // Windows: resolved target is not a PE
 
     // Callbacks (moved in, not copied)

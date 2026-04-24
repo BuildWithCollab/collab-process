@@ -16,7 +16,7 @@ struct UnixProcessImpl : RunningProcess::Impl {
     int stdout_fd = -1;
     int stderr_fd = -1;
 
-    // Set before fork() from params.process_group. When true the child is
+    // Set before fork() from params.signalable. When true the child is
     // a process-group leader, so terminate/interrupt/kill signal the whole
     // group (negative pid). When false we must signal the pid directly —
     // negating an arbitrary pid would target whatever group it belongs to
@@ -167,15 +167,18 @@ struct UnixProcessImpl : RunningProcess::Impl {
     }
 
     auto terminate() -> bool override {
+        // Non-signalable children share the terminal's signal path already —
+        // Ctrl+C is the user-facing tool; terminate() is intentionally a no-op
+        // so the public contract matches Windows.
+        if (!has_own_group) return false;
         if (!is_alive()) return false;
-        pid_t target = has_own_group ? -child_pid : child_pid;
-        return ::kill(target, SIGTERM) == 0;
+        return ::kill(-child_pid, SIGTERM) == 0;
     }
 
     auto interrupt() -> bool override {
+        if (!has_own_group) return false;
         if (!is_alive()) return false;
-        pid_t target = has_own_group ? -child_pid : child_pid;
-        return ::kill(target, SIGINT) == 0;
+        return ::kill(-child_pid, SIGINT) == 0;
     }
 
     auto kill() -> bool override {
@@ -208,7 +211,7 @@ auto platform_spawn(SpawnParams params)
     impl->on_stderr = std::move(params.on_stderr);
     // Must match the setpgid() branch in the child below — terminate/kill
     // consult this to decide between killpg (-pid) and a direct signal.
-    impl->has_own_group = (params.process_group == CommandConfig::ProcessGroup::own);
+    impl->has_own_group = params.signalable;
 
     // Stdin pipe
     int stdin_pipe[2] = {-1, -1};
@@ -282,14 +285,12 @@ auto platform_spawn(SpawnParams params)
         if (!params.working_dir.empty())
             (void)chdir(params.working_dir.c_str());
 
-        // Process-group setup — only if the caller asked for it. Joining the
-        // parent's process group is the default so interactive-inherit
-        // children behave like shell children (Ctrl+C routes naturally).
-        if (params.process_group == CommandConfig::ProcessGroup::own)
+        // Put the child in its own process group so group-scoped signals
+        // (terminate/interrupt/kill via -pid) have a target and terminal
+        // SIGINT doesn't reach it. Non-signalable children stay in the
+        // parent's group and keep the natural Ctrl+C path.
+        if (params.signalable)
             setpgid(0, 0);
-        // Session detach — Unix-only concept (no-op on Windows).
-        if (params.session == CommandConfig::Session::new_session)
-            setsid();
 
         // Build argv
         std::vector<const char*> argv;

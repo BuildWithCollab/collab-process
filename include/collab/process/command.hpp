@@ -158,33 +158,8 @@ public:
         return std::forward<decltype(self)>(self);
     }
 
-    auto process_group(this auto&& self, CommandConfig::ProcessGroup group) -> decltype(auto) {
-        self.config_.process_group = group;
-        return std::forward<decltype(self)>(self);
-    }
-
-    auto own_process_group(this auto&& self) -> decltype(auto) {
-        self.config_.process_group = CommandConfig::ProcessGroup::own;
-        return std::forward<decltype(self)>(self);
-    }
-
-    auto inherit_process_group(this auto&& self) -> decltype(auto) {
-        self.config_.process_group = CommandConfig::ProcessGroup::inherit;
-        return std::forward<decltype(self)>(self);
-    }
-
-    auto session(this auto&& self, CommandConfig::Session s) -> decltype(auto) {
-        self.config_.session = s;
-        return std::forward<decltype(self)>(self);
-    }
-
-    auto new_session(this auto&& self) -> decltype(auto) {
-        self.config_.session = CommandConfig::Session::new_session;
-        return std::forward<decltype(self)>(self);
-    }
-
-    auto inherit_session(this auto&& self) -> decltype(auto) {
-        self.config_.session = CommandConfig::Session::inherit;
+    auto signalable(this auto&& self, bool value = true) -> decltype(auto) {
+        self.config_.signalable = value;
         return std::forward<decltype(self)>(self);
     }
 

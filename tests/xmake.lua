@@ -21,8 +21,7 @@ target("collab-process-tests")
         "test_io_callbacks.cpp",
         "test_spawn_errors.cpp",
         "test_dotenv.cpp",
-        "test_signals.cpp",
-        "test_session.cpp"
+        "test_signals.cpp"
     )
 
     -- Pass the build output dir so tests can find test_helper

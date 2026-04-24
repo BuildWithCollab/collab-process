@@ -48,11 +48,13 @@ static fs::path unique_pid_file() {
 }
 
 // ── terminate() ────────────────────────────────────────────────
+//
+// Redirected streams → signalable inferred true → terminate() delivers.
+// All-inherit streams → signalable inferred false → terminate() returns false.
 
-TEST_CASE("terminate: own group + signal_trap → child exits 42", "[signals][terminate]") {
+TEST_CASE("terminate: redirected streams + signal_trap → child exits 42", "[signals][terminate]") {
     auto proc = Command(helper_path())
         .args({"signal_trap"})
-        .own_process_group()
         .stdout_discard()
         .stderr_discard()
         .spawn();
@@ -68,10 +70,9 @@ TEST_CASE("terminate: own group + signal_trap → child exits 42", "[signals][te
     CHECK(result->exit_code == 42);
 }
 
-TEST_CASE("terminate: own group + signal_ignore → true but still alive", "[signals][terminate]") {
+TEST_CASE("terminate: redirected streams + signal_ignore → true but still alive", "[signals][terminate]") {
     auto proc = Command(helper_path())
         .args({"signal_ignore"})
-        .own_process_group()
         .stdout_discard()
         .stderr_discard()
         .spawn();
@@ -85,45 +86,6 @@ TEST_CASE("terminate: own group + signal_ignore → true but still alive", "[sig
 
     proc->kill();
 }
-
-#ifdef _WIN32
-TEST_CASE("terminate: inherit group on Windows → returns false", "[signals][terminate]") {
-    auto proc = Command(helper_path())
-        .args({"signal_trap"})
-        .inherit_process_group()
-        .stdout_discard()
-        .stderr_discard()
-        .spawn();
-
-    REQUIRE(proc.has_value());
-    std::this_thread::sleep_for(200ms);
-
-    // With no new process group, CTRL_BREAK has no group to target.
-    CHECK_FALSE(proc->terminate());
-
-    proc->kill();
-}
-#endif
-
-#ifndef _WIN32
-TEST_CASE("terminate: inherit group on Unix + signal_trap → child exits 42", "[signals][terminate]") {
-    auto proc = Command(helper_path())
-        .args({"signal_trap"})
-        .inherit_process_group()
-        .stdout_discard()
-        .stderr_discard()
-        .spawn();
-
-    REQUIRE(proc.has_value());
-    std::this_thread::sleep_for(200ms);
-
-    REQUIRE(proc->terminate());
-
-    auto result = proc->wait_for(3s);
-    REQUIRE(result.has_value());
-    CHECK(result->exit_code == 42);
-}
-#endif
 
 TEST_CASE("terminate: after wait() has reaped the child → returns false", "[signals][terminate]") {
     auto proc = Command(helper_path())
@@ -144,7 +106,6 @@ TEST_CASE("terminate: after wait() has reaped the child → returns false", "[si
 TEST_CASE("interrupt: Windows always returns false", "[signals][interrupt]") {
     auto proc = Command(helper_path())
         .args({"signal_trap"})
-        .own_process_group()
         .stdout_discard()
         .stderr_discard()
         .spawn();
@@ -159,28 +120,9 @@ TEST_CASE("interrupt: Windows always returns false", "[signals][interrupt]") {
 #endif
 
 #ifndef _WIN32
-TEST_CASE("interrupt: Unix own group + signal_trap → child exits 43", "[signals][interrupt]") {
+TEST_CASE("interrupt: Unix redirected streams + signal_trap → child exits 43", "[signals][interrupt]") {
     auto proc = Command(helper_path())
         .args({"signal_trap"})
-        .own_process_group()
-        .stdout_discard()
-        .stderr_discard()
-        .spawn();
-
-    REQUIRE(proc.has_value());
-    std::this_thread::sleep_for(200ms);
-
-    REQUIRE(proc->interrupt());
-
-    auto result = proc->wait_for(3s);
-    REQUIRE(result.has_value());
-    CHECK(result->exit_code == 43);
-}
-
-TEST_CASE("interrupt: Unix inherit group + signal_trap → child exits 43", "[signals][interrupt]") {
-    auto proc = Command(helper_path())
-        .args({"signal_trap"})
-        .inherit_process_group()
         .stdout_discard()
         .stderr_discard()
         .spawn();
@@ -213,12 +155,11 @@ TEST_CASE("kill: then wait_for returns Result and is_alive is false", "[signals]
     CHECK_FALSE(proc->is_alive());
 }
 
-TEST_CASE("kill: own group + spawn_child → grandchild also dies", "[signals][kill]") {
+TEST_CASE("kill: redirected streams + spawn_child → grandchild also dies", "[signals][kill]") {
     auto pid_file = unique_pid_file();
 
     auto proc = Command(helper_path())
         .args({"spawn_child", "30", pid_file.string()})
-        .own_process_group()
         .stdout_discard()
         .stderr_discard()
         .spawn();
@@ -237,68 +178,12 @@ TEST_CASE("kill: own group + spawn_child → grandchild also dies", "[signals][k
     std::error_code ec;
     fs::remove(pid_file, ec);
 }
-
-#ifndef _WIN32
-TEST_CASE("kill: Unix inherit group + spawn_child → grandchild survives", "[signals][kill]") {
-    auto pid_file = unique_pid_file();
-
-    auto proc = Command(helper_path())
-        .args({"spawn_child", "30", pid_file.string()})
-        .inherit_process_group()
-        .stdout_discard()
-        .stderr_discard()
-        .spawn();
-
-    REQUIRE(proc.has_value());
-
-    int grandchild = wait_for_pid_file(pid_file, 3s);
-    REQUIRE(grandchild > 0);
-
-    CHECK(proc->kill());
-    std::this_thread::sleep_for(500ms);
-
-    ProcessRef gc(grandchild);
-    CHECK(gc.is_alive());  // documents the tradeoff — no group to cascade
-
-    gc.kill();  // cleanup
-    std::error_code ec;
-    fs::remove(pid_file, ec);
-}
-#endif
-
-#ifdef _WIN32
-TEST_CASE("kill: Windows inherit group + spawn_child → grandchild dies via job", "[signals][kill]") {
-    auto pid_file = unique_pid_file();
-
-    auto proc = Command(helper_path())
-        .args({"spawn_child", "30", pid_file.string()})
-        .inherit_process_group()
-        .stdout_discard()
-        .stderr_discard()
-        .spawn();
-
-    REQUIRE(proc.has_value());
-
-    int grandchild = wait_for_pid_file(pid_file, 3s);
-    REQUIRE(grandchild > 0);
-
-    CHECK(proc->kill());
-    std::this_thread::sleep_for(500ms);
-
-    ProcessRef gc(grandchild);
-    CHECK_FALSE(gc.is_alive());
-
-    std::error_code ec;
-    fs::remove(pid_file, ec);
-}
-#endif
 
 // ── Composition (what stop() used to do) ───────────────────────
 
 TEST_CASE("compose: terminate + wait_for reaps signal_trap child with exit 42", "[signals][compose]") {
     auto proc = Command(helper_path())
         .args({"signal_trap"})
-        .own_process_group()
         .stdout_discard()
         .stderr_discard()
         .spawn();
@@ -316,7 +201,6 @@ TEST_CASE("compose: terminate + wait_for reaps signal_trap child with exit 42", 
 TEST_CASE("compose: terminate then kill reaps signal_ignore child", "[signals][compose]") {
     auto proc = Command(helper_path())
         .args({"signal_ignore"})
-        .own_process_group()
         .stdout_discard()
         .stderr_discard()
         .spawn();
@@ -332,3 +216,43 @@ TEST_CASE("compose: terminate then kill reaps signal_ignore child", "[signals][c
     REQUIRE(result.has_value());
     CHECK_FALSE(proc->is_alive());
 }
+
+// ── signalable() override ──────────────────────────────────────
+
+TEST_CASE("signalable(false) on captured stdout → terminate returns false", "[signals][signalable]") {
+    auto proc = Command(helper_path())
+        .args({"signal_trap"})
+        .stdout_capture()
+        .stderr_discard()
+        .signalable(false)
+        .spawn();
+
+    REQUIRE(proc.has_value());
+    std::this_thread::sleep_for(200ms);
+
+    // Even though stdout is captured (which would normally infer signalable),
+    // the override suppresses process-group setup.
+    CHECK_FALSE(proc->terminate());
+
+    proc->kill();
+}
+
+#ifndef _WIN32
+TEST_CASE("signalable(true) on all-inherit spawn → Unix terminate delivers", "[signals][signalable]") {
+    // All streams inherit would normally infer signalable false. The
+    // override forces process-group setup so terminate() reaches the child.
+    auto proc = Command(helper_path())
+        .args({"signal_trap"})
+        .signalable(true)
+        .spawn();
+
+    REQUIRE(proc.has_value());
+    std::this_thread::sleep_for(200ms);
+
+    REQUIRE(proc->terminate());
+
+    auto result = proc->wait_for(3s);
+    REQUIRE(result.has_value());
+    CHECK(result->exit_code == 42);
+}
+#endif

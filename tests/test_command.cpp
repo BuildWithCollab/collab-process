@@ -285,56 +285,27 @@ TEST_CASE("command: invalid program returns command_not_found", "[command]") {
     CHECK(result.error().kind == SpawnError::command_not_found);
 }
 
-// ── process_group builder ──────────────────────────────────────
+// ── signalable builder ─────────────────────────────────────────
 
-TEST_CASE("command: process_group defaults to inherit", "[command][process_group]") {
+TEST_CASE("command: signalable defaults to nullopt", "[command][signalable]") {
     CommandConfig cfg;
-    CHECK(cfg.process_group == CommandConfig::ProcessGroup::inherit);
+    CHECK_FALSE(cfg.signalable.has_value());
 }
 
-TEST_CASE("command: own_process_group() sets own", "[command][process_group]") {
-    auto cmd = Command("x").own_process_group();
-    CHECK(cmd.config().process_group == CommandConfig::ProcessGroup::own);
+TEST_CASE("command: signalable() sets true", "[command][signalable]") {
+    auto cmd = Command("x").signalable();
+    REQUIRE(cmd.config().signalable.has_value());
+    CHECK(*cmd.config().signalable == true);
 }
 
-TEST_CASE("command: inherit_process_group() sets inherit", "[command][process_group]") {
-    auto cmd = Command("x").own_process_group().inherit_process_group();
-    CHECK(cmd.config().process_group == CommandConfig::ProcessGroup::inherit);
+TEST_CASE("command: signalable(false) sets false", "[command][signalable]") {
+    auto cmd = Command("x").signalable(false);
+    REQUIRE(cmd.config().signalable.has_value());
+    CHECK(*cmd.config().signalable == false);
 }
 
-TEST_CASE("command: process_group(own) sets own via enum setter", "[command][process_group]") {
-    auto cmd = Command("x").process_group(CommandConfig::ProcessGroup::own);
-    CHECK(cmd.config().process_group == CommandConfig::ProcessGroup::own);
-}
-
-TEST_CASE("command: later process_group call replaces earlier", "[command][process_group]") {
-    auto cmd = Command("x").own_process_group().inherit_process_group();
-    CHECK(cmd.config().process_group == CommandConfig::ProcessGroup::inherit);
-}
-
-// ── session builder ────────────────────────────────────────────
-
-TEST_CASE("command: session defaults to inherit", "[command][session]") {
-    CommandConfig cfg;
-    CHECK(cfg.session == CommandConfig::Session::inherit);
-}
-
-TEST_CASE("command: new_session() sets new_session", "[command][session]") {
-    auto cmd = Command("x").new_session();
-    CHECK(cmd.config().session == CommandConfig::Session::new_session);
-}
-
-TEST_CASE("command: inherit_session() sets inherit", "[command][session]") {
-    auto cmd = Command("x").new_session().inherit_session();
-    CHECK(cmd.config().session == CommandConfig::Session::inherit);
-}
-
-TEST_CASE("command: session(new_session) sets via enum setter", "[command][session]") {
-    auto cmd = Command("x").session(CommandConfig::Session::new_session);
-    CHECK(cmd.config().session == CommandConfig::Session::new_session);
-}
-
-TEST_CASE("command: later session call replaces earlier", "[command][session]") {
-    auto cmd = Command("x").new_session().inherit_session();
-    CHECK(cmd.config().session == CommandConfig::Session::inherit);
+TEST_CASE("command: later signalable call replaces earlier", "[command][signalable]") {
+    auto cmd = Command("x").signalable(true).signalable(false);
+    REQUIRE(cmd.config().signalable.has_value());
+    CHECK(*cmd.config().signalable == false);
 }

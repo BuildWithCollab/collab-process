@@ -15,6 +15,7 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
   - [Result](#result)
   - [SpawnError](#spawnerror)
   - [RunningProcess](#runningprocess)
+  - [Signal reachability](#signal-reachability)
   - [ProcessRef](#processref)
   - [Command (fluent builder)](#command-fluent-builder)
   - [Dotenv Integration](#dotenv-integration)
@@ -176,19 +177,13 @@ struct CommandConfig {
     std::string stdin_content;            // read when mode == content
     std::filesystem::path stdin_path;     // read when mode == file
 
-    // Process group — scopes signal delivery and tree kill.
-    // own: child is a process-group leader (Unix setpgid / Windows
-    //      CREATE_NEW_PROCESS_GROUP). Required on Windows for terminate().
-    enum class ProcessGroup { inherit, own };
-
-    // Session — Unix-only. new_session calls setsid() so the child
-    // detaches from the controlling terminal. No-op on Windows.
-    enum class Session { inherit, new_session };
-
     // Behavior
     std::chrono::milliseconds timeout{0}; // 0 = no timeout
-    ProcessGroup process_group = ProcessGroup::inherit;
-    Session session = Session::inherit;
+
+    // Signal reachability. nullopt = infer from stream modes (any stream
+    // redirected → true, all inherit → false). Set to override the inference.
+    std::optional<bool> signalable;
+
     bool dotenv = false;                  // load .env files into child env
 };
 ```
@@ -319,15 +314,35 @@ if (!proc->wait_for(5s).has_value())   // didn't exit in time
     proc->kill();                      // escalate
 ```
 
-On Windows, `terminate()` requires the child was spawned with
-`own_process_group()` — CTRL_BREAK_EVENT has no group to target otherwise.
-`interrupt()` is Unix-only; it always returns `false` on Windows.
+`terminate()` and `interrupt()` only deliver when the child was spawned
+signalable (see [Signal reachability](#signal-reachability) below); otherwise
+they return `false`. `interrupt()` is Unix-only; it always returns `false`
+on Windows.
 
 ```cpp
 // Detach if the child should outlive this handle
 int pid = std::move(*proc).detach();
 save_to_db(pid);  // reconnect later with ProcessRef
 ```
+
+### Signal reachability
+
+Whether `terminate()` / `interrupt()` can reach the child, and whether the
+user's Ctrl+C does, depends on how the child was spawned. The library
+infers this from the stream modes you already configured — redirecting any
+stream is taken as a sign you're driving the child from code and want to
+drive its signals from code too.
+
+| Configuration | Ctrl+C from user | `terminate()` / `interrupt()` | `kill()` |
+|---|---|---|---|
+| Any stream redirected (inferred **signalable**) | does not reach child | deliver from code | cascades to descendants |
+| All streams inherit (inferred **not signalable**) | reaches child naturally | return `false` | direct child only on Unix; Windows still tree-kills via Job Object |
+
+Override the inference with `.signalable(true)` or `.signalable(false)` (or
+set `CommandConfig::signalable` directly) when you need the opposite —
+e.g. spawning an all-inherit child that you still want to send
+`terminate()` to, or capturing stdout from a child that should still
+receive the user's Ctrl+C.
 
 ### ProcessRef
 
@@ -380,9 +395,7 @@ auto result = std::move(cmd).run();
 | **Stdin** | `stdin_string(content)`, `stdin_file(path)`, `stdin_close()`, `stdin_inherit()` |
 | **Stdout** | `stdout_capture()`, `stdout_inherit()`, `stdout_discard()`, `stdout_callback(fn)` |
 | **Stderr** | `stderr_capture()`, `stderr_inherit()`, `stderr_discard()`, `stderr_merge()`, `stderr_callback(fn)` |
-| **Process group** | `process_group(mode)`, `own_process_group()`, `inherit_process_group()` |
-| **Session** (Unix) | `session(mode)`, `new_session()`, `inherit_session()` |
-| **Behavior** | `timeout(ms)`, `dotenv()` |
+| **Behavior** | `timeout(ms)`, `signalable(bool)`, `dotenv()` |
 | **Execute** | `run()` → `expected<Result>`, `spawn()` → `expected<RunningProcess>`, `spawn_detached()` → `expected<int>` |
 
 ### Dotenv Integration
@@ -461,8 +474,7 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 | stderr | inherit | Child errors to terminal |
 | env | copy parent | Apply additions/removals on top |
 | timeout | none | No timeout unless set |
-| process_group | inherit | Child joins caller's process group |
-| session | inherit | Child stays in caller's session (Unix) |
+| signalable | inferred | Any stream redirected → true; all inherit → false |
 | dotenv | false | No .env file loading |
 
 `CommandConfig{}` with just a `program` set behaves like running the command in your terminal. Capture is opt-in.
@@ -474,7 +486,7 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 3. **On Windows: MZ check** — read 2 bytes. `MZ` → `CreateProcessW` directly. Not `MZ` → wrap with `cmd /c`
 4. **Build env block** — copy parent (or start empty), apply add/remove. Child gets its own block; parent is never touched
 5. **Create pipes** — only for modes that need them
-6. **On Windows, interactive mode** (all streams inherit, `process_group == inherit`) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
+6. **On Windows, interactive mode** (all streams inherit, child not signalable) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
 7. **Spawn** — `CreateProcessW` / `fork`+`execve`. Job object (Windows) or process group (Unix) for tree kill
 8. **Concurrent I/O** — stdin writes in a background thread to prevent deadlock with stdout/stderr reading
 9. **Return** — `run()` waits + returns `Result`. `spawn()` returns `RunningProcess` immediately
