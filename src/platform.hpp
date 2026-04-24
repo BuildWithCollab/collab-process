@@ -34,7 +34,12 @@ struct SpawnParams {
     std::filesystem::path stdin_path;
 
     // Behavior
-    bool detached = false;
+    //
+    // headless: resolved from CommandConfig::mode by the shared layer. Drives
+    // isolation of the child into its own process group for code-driven
+    // signalling. When false, the child shares the parent's process group and
+    // terminate()/interrupt() throw ModeError.
+    bool headless = false;
     bool needs_cmd_wrapper = false;  // Windows: resolved target is not a PE
 
     // Callbacks (moved in, not copied)

@@ -38,7 +38,20 @@ struct CommandConfig {
 
     // Behavior
     std::chrono::milliseconds timeout{0};  // 0 = no timeout
-    bool detached = false;                 // child survives parent
+
+    // Signal ownership. The child can safely receive SIGINT / SIGTERM from
+    // exactly one place:
+    //   interactive — terminal drives signals. Child shares the parent's
+    //                 process group. Ctrl+C reaches parent and child
+    //                 together. Code-driven terminate()/interrupt() throw
+    //                 ModeError; kill() still works so RAII teardown is
+    //                 unconditional.
+    //   headless    — code drives signals. Child is in its own process
+    //                 group. Terminal Ctrl+C does not reach it.
+    //                 terminate()/interrupt() deliver via killpg (Unix) or
+    //                 CTRL_BREAK_EVENT (Windows).
+    enum class Mode { interactive, headless };
+    Mode mode = Mode::interactive;
 
     // Dotenv — load .env files into the child's environment
     bool dotenv = false;                   // false = no .env loading

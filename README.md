@@ -4,27 +4,41 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
 
 ## Table of Contents
 
+- [Highlights](#highlights)
 - [Quick Start](#quick-start)
 - [Installation](#installation)
   - [xmake](#xmake)
   - [CMake / vcpkg](#cmake--vcpkg)
-- [Two Paths, One Engine](#two-paths-one-engine)
-- [API Reference](#api-reference)
-  - [CommandConfig](#commandconfig)
-  - [IoCallbacks](#iocallbacks)
-  - [Result](#result)
-  - [SpawnError](#spawnerror)
-  - [StopResult](#stopresult)
-  - [RunningProcess](#runningprocess)
-  - [ProcessRef](#processref)
-  - [Command (fluent builder)](#command-fluent-builder)
-  - [Dotenv Integration](#dotenv-integration)
-  - [Free Functions](#free-functions)
-  - [Utilities](#utilities)
+- [Concepts](#concepts)
+  - [Modes: Interactive vs Headless](#modes-interactive-vs-headless)
+  - [Lifecycle Guarantees](#lifecycle-guarantees)
+- [Recipes](#recipes)
+  - [Capture and stream output](#capture-and-stream-output)
+  - [Handle spawn errors](#handle-spawn-errors)
+  - [Send input to a command](#send-input-to-a-command)
+  - [Run with a timeout](#run-with-a-timeout)
+  - [Set environment and working directory](#set-environment-and-working-directory)
+  - [Load environment from .env files](#load-environment-from-env-files)
+  - [Manage a long-running process](#manage-a-long-running-process)
+  - [Gracefully stop a server](#gracefully-stop-a-server)
+  - [Fire-and-forget a daemon](#fire-and-forget-a-daemon)
+  - [Reusable command templates](#reusable-command-templates)
+  - [Resolve a command's path](#resolve-a-commands-path)
+  - [Reconnect to a process by PID](#reconnect-to-a-process-by-pid)
 - [Defaults](#defaults)
-- [What Happens Internally](#what-happens-internally)
+- [Platform Notes](#platform-notes)
+- [API Reference](#api-reference)
 - [Building](#building)
 - [Testing](#testing)
+
+## Highlights
+
+- 🪶 **C++23 ergonomics** — `std::expected`, deducing `this`, move-only callbacks
+- 🎛️ **Fluent builder + plain struct** — choose by call site, same engine underneath
+- 🛡️ **Cross-platform lifecycle parity** — non-detached children die with the parent on Windows, Linux, and macOS. No orphans.
+- 📡 **Live streaming** — get stdout/stderr via callbacks as the child writes, no polling
+- 🎭 **Explicit signal ownership** — `interactive` (terminal drives Ctrl+C) vs `headless` (your code drives `terminate()` / `kill()`)
+- 🧬 **Dotenv built in** — `.env`, `.env.yaml`, `.env.json`, hierarchical discovery, `${VAR}` expansion
 
 ## Quick Start
 
@@ -33,25 +47,27 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
 
 using namespace collab::process;
 
-// Capture output from a command
-CommandConfig config;
-config.program = "git";
-config.args = {"status", "--porcelain"};
-config.stdout_mode = CommandConfig::OutputMode::capture;
-
-auto result = collab::process::run(config);
-if (result && result->ok())
-    use(result->stdout_content);
-```
-
-Or with the fluent builder:
-
-```cpp
 auto result = Command("git")
-    .args({"status", "--porcelain"})
+    .args({"log", "--oneline", "-5"})
     .stdout_capture()
     .run();
+
+if (result && result->ok())
+    std::cout << result->stdout_content;
 ```
+
+Or as a plain struct, when things get decided at runtime:
+
+```cpp
+CommandConfig config;
+config.program = "git";
+config.args = {"log", "--oneline", "-5"};
+config.stdout_mode = CommandConfig::OutputMode::capture;
+
+auto result = run(config);
+```
+
+Both go through the same `run()` / `spawn()` engine. Pick whichever fits the call site.
 
 ## Installation
 
@@ -139,52 +155,253 @@ For more details, see the [Packages registry README](https://github.com/BuildWit
 #include <collab/process.hpp>
 ```
 
-## Two Paths, One Engine
+## Concepts
 
-| Path | For when... | Example |
-|------|-------------|---------|
-| **`CommandConfig`** (struct) | Everything is determined at runtime — programs from config, conditional flags, reusable templates | `config.program = provider.executable();` |
-| **`Command`** (fluent builder) | You know things at write time and want a clean chain | `Command("git").args({...}).run()` |
+Two ideas show up across the recipes — worth a minute up front.
 
-Both call the same `collab::process::run()` / `spawn()` underneath. `Command` is sugar over `CommandConfig`.
+### Modes: Interactive vs Headless
 
-## API Reference
+A child process can safely receive `SIGINT` / `SIGTERM` from exactly one place — that's the **mode**. Process-group membership is one bit, set at spawn time.
 
-### CommandConfig
+| Mode | Ctrl+C from terminal | `terminate()` / `interrupt()` | `kill()` |
+|---|---|---|---|
+| **`interactive`** (default) | Reaches the child (shared process group) | Throws `ModeError` | Works (single-process on Unix, Job Object tree-kill on Windows) |
+| **`headless`** (opt-in) | Does not reach the child (own process group) | Delivers via `killpg` / `CTRL_BREAK_EVENT` | Works (tree kill in both) |
 
-Plain data struct. Copyable. Storable. Build it however you want.
+`kill()` is unconditional in both modes so the destructor can always tear down. `terminate()` and `interrupt()` are deliberately strict — calling them on an interactive handle throws `ModeError` (a `std::logic_error`), because there's no sane meaning to "the terminal owns signals AND I'm about to send one."
+
+`spawn_detached()` always forces `headless` regardless of the caller's config — a detached child must not share the dying parent's process group.
+
+> Note: `interrupt()` on Windows always returns `false` even in headless mode. `CTRL_C_EVENT` cannot target a process group and is disabled for processes in a new process group per MSDN.
+
+### Lifecycle Guarantees
+
+A non-detached child's lifetime is bounded by its parent's lifetime — on **every platform**, including when the parent dies abruptly.
+
+| Parent ends by... | Non-detached child | Detached child |
+|---|---|---|
+| Scope exit (`~RunningProcess()`) | Killed (RAII) | (already released) |
+| Normal exit / return from `main` | Killed | Survives |
+| Crash, `SIGKILL`, OOM kill | Killed | Survives |
+
+This parity matters and it's enforced differently on each platform: on Windows by the Job Object's kill-on-close flag; on Linux and macOS by an internal supervisor process that watches the library's lifetime and cleans up the target if the library dies. The mechanism is invisible — `pid()`, `wait()`, and the signal methods all act on the target you spawned.
+
+Use `detach()` when you explicitly want a child to outlive its parent (daemons, fire-and-forget jobs handed to an external tracker, observe-then-release patterns). Otherwise, trust that exiting — for any reason — cleans up.
+
+## Recipes
+
+Each recipe is self-contained. `using namespace collab::process;` is assumed. Every recipe shown with the fluent `Command` builder works the same with `CommandConfig` — see [Reusable command templates](#reusable-command-templates).
+
+### Capture and stream output
+
+Block on the child and read the captured output afterwards:
 
 ```cpp
-struct CommandConfig {
-    std::string program;                  // command name or path
-    std::vector<std::string> args;        // arguments
-    std::filesystem::path working_dir;    // empty = inherit parent's
+auto result = Command("git")
+    .args({"log", "--oneline", "-5"})
+    .stdout_capture()
+    .run();
 
-    // Environment — applied on top of parent env (never modifies parent)
-    std::vector<std::pair<std::string, std::string>> env_add;
-    std::vector<std::string> env_remove;
-    bool env_clear = false;               // true = start empty, only env_add
+if (result && result->ok())
+    std::cout << result->stdout_content;
+```
 
-    // Stdout / Stderr
-    enum class OutputMode { inherit, capture, discard };
-    OutputMode stdout_mode = OutputMode::inherit;
-    OutputMode stderr_mode = OutputMode::inherit;
-    bool stderr_merge = false;            // merge stderr into stdout stream
+For long-running processes, attach a callback and handle output as it arrives — no polling, no waiting for exit:
 
-    // Stdin — explicit enum, no ambiguity
-    enum class StdinMode { inherit, content, file, closed };
-    StdinMode stdin_mode = StdinMode::inherit;
-    std::string stdin_content;            // read when mode == content
-    std::filesystem::path stdin_path;     // read when mode == file
+```cpp
+auto proc = Command("tail").args({"-f", "/var/log/app.log"})
+    .stdout_capture()
+    .stdout_callback([](std::string_view chunk) {
+        process_chunk(chunk);      // fires on the I/O thread as data arrives
+    })
+    .spawn();
+```
 
-    // Behavior
-    std::chrono::milliseconds timeout{0}; // 0 = no timeout
-    bool detached = false;                // child survives parent
-    bool dotenv = false;                  // load .env files into child env
+Stderr has the same surface: `stderr_capture()`, `stderr_discard()`, `stderr_callback(...)`. Or merge stderr into stdout:
+
+```cpp
+auto result = Command("npm").args({"install"})
+    .stdout_capture()
+    .stderr_merge()                // stderr lines appear in stdout_content
+    .run();
+```
+
+Callbacks live outside `CommandConfig` (so the config stays copyable). Pass them as a separate `IoCallbacks` to the free functions:
+
+```cpp
+IoCallbacks callbacks;
+callbacks.on_stdout = [](std::string_view chunk) { process_chunk(chunk); };
+
+auto result = run(config, std::move(callbacks));
+```
+
+What you get back — `Result` is plain data:
+
+```cpp
+struct Result {
+    std::string stdout_content;        // empty unless stdout was captured
+    std::string stderr_content;        // empty unless stderr was captured
+    std::optional<int> exit_code;      // nullopt if the child never exited
+    bool timed_out = false;
+
+    auto ok() const -> bool;           // exit_code == 0 && !timed_out
 };
 ```
 
-**Configs are copyable** — build a template, copy it, tweak per-invocation:
+### Handle spawn errors
+
+`run()` and `spawn()` return `std::expected<T, SpawnError>`. A non-engaged result means the spawn itself failed (program not found, bad working dir, etc.) — distinct from "the child ran and exited non-zero":
+
+```cpp
+auto result = Command("does-not-exist").run();
+if (!result) {
+    auto& err = result.error();
+    std::cerr << err.what() << "\n";       // human-readable message
+    if (err.kind == SpawnError::command_not_found)
+        return install_or_bail();
+    return;
+}
+// result.value() — child started; check ok() / exit_code / timed_out
+```
+
+`SpawnError::Kind` covers: `command_not_found`, `permission_denied`, `pipe_creation_failed`, `invalid_working_directory`, `platform_error`. The `native_error` field carries the raw `errno` (Unix) or `GetLastError()` (Windows) for diagnostics.
+
+The only other failure path you'll hit is `ModeError`, thrown by `terminate()` / `interrupt()` if you call them on an `interactive` handle — see [Modes](#modes-interactive-vs-headless).
+
+### Send input to a command
+
+```cpp
+auto result = Command("python").args({"-"})
+    .stdin_string("print('hello from stdin')\n")
+    .stdout_capture()
+    .run();
+```
+
+Other stdin sources:
+
+```cpp
+.stdin_file("/path/to/input.txt")  // pipe a file
+.stdin_close()                      // close stdin immediately (EOF)
+.stdin_inherit()                    // child reads from parent's terminal (default)
+```
+
+### Run with a timeout
+
+```cpp
+using namespace std::chrono_literals;
+
+auto result = Command("slow-tool").timeout(30s).run();
+if (result && result->timed_out)
+    std::cerr << "took too long, killed\n";
+```
+
+`run()` kills the child if it exceeds the timeout. The returned `Result` has `timed_out == true` so you can distinguish a kill-by-timeout from a normal exit.
+
+### Set environment and working directory
+
+```cpp
+auto result = Command("myapp")
+    .working_directory("/path/to/project")
+    .env("DATABASE_URL", "postgres://localhost/dev")
+    .env_remove("SOME_INHERITED_VAR")
+    .stdout_capture()
+    .run();
+```
+
+By default the child gets a copy of the parent's environment with your additions/removals applied — the parent's environment is never modified. To start with an empty environment instead:
+
+```cpp
+.env_clear()                       // child starts with no env
+.env("PATH", "/usr/bin")           // add only what you need
+```
+
+### Load environment from `.env` files
+
+```cpp
+auto result = Command("myapp").dotenv().stdout_capture().run();
+```
+
+`.dotenv()` walks from `working_dir` (or cwd) up to the filesystem root, loads all `.env` / `.env.yaml` / `.env.json` files it finds, merges them, and expands `${VAR}` references. Explicit `.env(key, value)` calls always win over file values:
+
+```cpp
+// .env has DATABASE_URL=from_file
+// Explicit env wins:
+auto result = Command("myapp")
+    .dotenv()
+    .env("DATABASE_URL", "from_config")
+    .run();
+// child sees DATABASE_URL=from_config
+```
+
+Backed by [dotenv](https://github.com/BuildWithCollab/dotenv).
+
+### Manage a long-running process
+
+`spawn()` returns a `RunningProcess` handle immediately instead of blocking:
+
+```cpp
+auto proc = Command("worker").stdout_capture().spawn();
+if (!proc) return;
+
+// do other work...
+
+if (some_condition)
+    proc->kill();
+
+auto result = proc->wait();        // blocks until exit
+```
+
+`RunningProcess` is move-only and **kills the child in its destructor** — like `jthread`, cleanup is automatic on scope exit. Use `is_alive()` to poll or `wait_for(timeout)` to wait without killing.
+
+The fluent `Command` builder uses C++23 deducing `this` and its `run()` / `spawn()` are `&&`-qualified — the builder is consumed on execute. For multi-statement construction, `std::move()` it explicitly:
+
+```cpp
+auto cmd = Command("worker");
+cmd.stdout_capture();
+if (need_input) cmd.stdin_string(input);
+auto proc = std::move(cmd).spawn();
+```
+
+### Gracefully stop a server
+
+Servers want a polite signal first, escalation if they ignore it. Compose it from primitives:
+
+```cpp
+using namespace std::chrono_literals;
+
+auto proc = Command("server").headless().spawn();
+if (!proc) return;
+
+proc->terminate();                     // SIGTERM (Unix) / CTRL_BREAK_EVENT (Windows)
+if (!proc->wait_for(5s).has_value())   // didn't exit in 5s?
+    proc->kill();                      // escalate (always works)
+```
+
+`terminate()` and `interrupt()` require `headless` mode — see [Modes](#modes-interactive-vs-headless). `kill()` works in both modes so the destructor can always tear down.
+
+### Fire-and-forget a daemon
+
+```cpp
+int pid = Command("background-worker").spawn_detached().value();
+// parent can exit; child keeps running
+save_to_db(pid);
+```
+
+`spawn_detached()` releases ownership immediately and returns the PID. The child outlives this process.
+
+For "spawn, observe briefly, then detach" (common when a daemon prints a readiness banner before backgrounding):
+
+```cpp
+auto proc = Command("daemon").stdout_capture().spawn();
+wait_for_ready_banner(*proc);
+int pid = std::move(*proc).detach();
+```
+
+`detach()` consumes the `RunningProcess` and returns the PID — the child stops being owned by this process.
+
+### Reusable command templates
+
+`CommandConfig` is plain data — copyable, storable, tweakable per call. This is the main reason both `Command` and `CommandConfig` exist:
 
 ```cpp
 CommandConfig base;
@@ -193,137 +410,24 @@ base.stdout_mode = CommandConfig::OutputMode::capture;
 base.env_remove = {"CLAUDECODE"};
 
 for (auto& prompt : prompts) {
-    auto config = base;  // copy
+    auto config = base;            // copy
     config.args = {"--print", prompt};
     auto result = run(config);
 }
 ```
 
-### IoCallbacks
-
-Move-only callbacks, passed at execution time. Fire on the I/O thread as data arrives.
+### Resolve a command's path
 
 ```cpp
-struct IoCallbacks {
-    std::move_only_function<void(std::string_view)> on_stdout;
-    std::move_only_function<void(std::string_view)> on_stderr;
-};
+if (auto path = find_executable("git"))
+    std::cout << "git is at " << *path << "\n";
+else
+    std::cerr << "git not on PATH\n";
 ```
 
-```cpp
-IoCallbacks callbacks;
-callbacks.on_stdout = [](std::string_view chunk) {
-    process_stream(chunk);
-};
-auto result = run(config, std::move(callbacks));
-```
+`find_executable()` walks `PATH` and returns the absolute path, or `std::nullopt` if not found. Useful for "is this tool installed?" checks before spawning.
 
-Callbacks live outside `CommandConfig` so the config stays copyable.
-
-### Result
-
-Returned by `run()` and `RunningProcess::wait()`.
-
-```cpp
-struct Result {
-    std::string stdout_content;           // empty unless stdout_mode == capture
-    std::string stderr_content;           // empty unless stderr_mode == capture
-    std::optional<int> exit_code;         // nullopt if process never exited
-    bool timed_out = false;
-
-    auto ok() const -> bool;             // exit_code == 0 && !timed_out
-};
-```
-
-### SpawnError
-
-Returned in `std::unexpected` when a process can't be created.
-
-```cpp
-struct SpawnError {
-    enum Kind {
-        command_not_found,
-        permission_denied,
-        pipe_creation_failed,
-        invalid_working_directory,
-        platform_error
-    };
-
-    Kind kind;
-    int native_error = 0;   // GetLastError() on Windows, errno on Unix
-
-    auto what() const -> std::string;
-};
-```
-
-### StopResult
-
-Returned by `RunningProcess::stop()` — tells you what actually happened.
-
-```cpp
-enum class StopResult {
-    stopped_gracefully,   // responded to SIGTERM / CTRL_BREAK
-    killed,               // had to escalate to SIGKILL / TerminateProcess
-    not_running,          // was already dead
-    failed                // couldn't stop it
-};
-```
-
-### RunningProcess
-
-Move-only RAII handle returned by `spawn()`. Owns the job object (Windows) / process group (Unix) for tree operations. **Destructor kills the process** — like `jthread`, cleanup is automatic.
-
-```cpp
-class RunningProcess {
-    auto pid() const -> int;
-    auto is_alive() const -> bool;
-
-    auto wait() -> std::expected<Result, SpawnError>;
-
-    // Poll: returns the Result if done, nullopt if still running.
-    // Does NOT kill the process on timeout.
-    auto wait_for(std::chrono::milliseconds timeout) -> std::optional<Result>;
-
-    // Graceful shutdown with escalation + tree kill
-    auto stop(std::chrono::milliseconds grace = 5s) -> StopResult;
-
-    // Immediate tree kill
-    auto kill() -> bool;
-
-    // Release ownership — child survives destruction.
-    // Returns PID for reconnection via ProcessRef.
-    auto detach(this RunningProcess&& self) -> int;
-};
-```
-
-```cpp
-auto proc = spawn(config);
-if (!proc) return;
-
-// ... later ...
-auto stop_result = proc->stop(5s);
-if (stop_result == StopResult::killed)
-    log("had to force kill");
-```
-
-```cpp
-// Detach if the child should outlive this handle
-int pid = std::move(*proc).detach();
-save_to_db(pid);  // reconnect later with ProcessRef
-```
-
-### ProcessRef
-
-Reconnect to a process by PID — e.g. from a database. Honest about its limitations: no process group, no tree kill, no graceful stop.
-
-```cpp
-class ProcessRef {
-    explicit ProcessRef(int pid);
-    auto pid() const -> int;
-    auto is_alive() const -> bool;
-    auto kill() -> bool;          // best-effort single-PID kill
-};
-```
+### Reconnect to a process by PID
 
 ```cpp
 auto ref = ProcessRef(pid_from_db);
@@ -331,107 +435,7 @@ if (ref.is_alive())
     ref.kill();
 ```
 
-### Command (fluent builder)
-
-Sugar over `CommandConfig`. Uses C++23 deducing `this` to preserve value category through the chain. `run()` and `spawn()` are `&&`-qualified — the Command is consumed on execute.
-
-```cpp
-// Temporary chain — rvalue flows through every method
-auto result = Command("claude")
-    .args({"--print", prompt})
-    .stdin_string(input)
-    .stdout_capture()
-    .stderr_discard()
-    .env_remove("CLAUDECODE")
-    .timeout(120s)
-    .run();
-
-// Named builder — explicit move at the end
-auto cmd = Command("claude");
-cmd.stdout_capture();
-if (need_input) cmd.stdin_string(input);
-auto result = std::move(cmd).run();
-```
-
-**Builder methods:**
-
-| Category | Methods |
-|----------|---------|
-| **Args** | `arg(string)`, `args(initializer_list)`, `args(vector)` |
-| **Where** | `working_directory(path)` |
-| **Env** | `env(key, value)`, `env_remove(key)`, `env_clear()` |
-| **Stdin** | `stdin_string(content)`, `stdin_file(path)`, `stdin_close()`, `stdin_inherit()` |
-| **Stdout** | `stdout_capture()`, `stdout_inherit()`, `stdout_discard()`, `stdout_callback(fn)` |
-| **Stderr** | `stderr_capture()`, `stderr_inherit()`, `stderr_discard()`, `stderr_merge()`, `stderr_callback(fn)` |
-| **Behavior** | `timeout(ms)`, `detached()`, `dotenv()` |
-| **Execute** | `run()` → `expected<Result>`, `spawn()` → `expected<RunningProcess>`, `spawn_detached()` → `expected<int>` |
-
-### Dotenv Integration
-
-Load `.env` files into the child's environment. Uses [dotenv](https://github.com/BuildWithCollab/dotenv) — supports `.env`, `.env.yaml`, `.env.json`, hierarchical discovery (walks to root), and `${VAR}` expansion.
-
-```cpp
-// Fluent
-auto result = Command("myapp")
-    .dotenv()
-    .stdout_capture()
-    .run();
-
-// Struct
-CommandConfig config;
-config.program = "myapp";
-config.dotenv = true;
-auto result = run(config);
-```
-
-Dotenv vars are loaded from `working_dir` (or cwd if unset) and prepended to `env_add` — explicit `env_add` entries always take precedence over `.env` values.
-
-```cpp
-// .env has DATABASE_URL=from_file
-// Explicit env_add wins:
-auto result = Command("myapp")
-    .dotenv()
-    .env("DATABASE_URL", "from_config")
-    .run();
-// child sees DATABASE_URL=from_config
-```
-
-When `dotenv` is `false` (the default), no `.env` files are loaded and there is no overhead.
-
-### Free Functions
-
-The engine. Both `CommandConfig` and `Command` go through these.
-
-```cpp
-namespace collab::process {
-
-auto run(CommandConfig config, IoCallbacks callbacks = {})
-    -> std::expected<Result, SpawnError>;
-
-auto spawn(CommandConfig config, IoCallbacks callbacks = {})
-    -> std::expected<RunningProcess, SpawnError>;
-
-// Fire-and-forget: no ownership, no RAII kill. Returns the PID.
-auto spawn_detached(CommandConfig config, IoCallbacks callbacks = {})
-    -> std::expected<int, SpawnError>;
-
-}
-```
-
-### Utilities
-
-```cpp
-// Resolve a command name to its full path via PATH
-auto find_executable(std::string_view name) -> std::optional<std::filesystem::path>;
-
-// Check if a file is a PE executable (MZ magic, first 2 bytes)
-// Always false on non-Windows.
-auto is_pe_executable(const std::filesystem::path& path) -> bool;
-
-// Write to a uniquely-named temp file (no collisions)
-auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
-    -> std::expected<std::filesystem::path, std::error_code>;
-```
+`ProcessRef` is a best-effort PID-based handle — no process group, no tree kill, no graceful stop. Use it when all you have is a PID (e.g., from a database or external supervisor).
 
 ## Defaults
 
@@ -442,22 +446,34 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 | stderr | inherit | Child errors to terminal |
 | env | copy parent | Apply additions/removals on top |
 | timeout | none | No timeout unless set |
-| detached | false | Child in caller's process group |
-| dotenv | false | No .env file loading |
+| mode | `Mode::interactive` | Terminal drives signals |
+| dotenv | false | No `.env` loading |
 
 `CommandConfig{}` with just a `program` set behaves like running the command in your terminal. Capture is opt-in.
 
-## What Happens Internally
+## Platform Notes
 
-1. **Load .env files** (if `dotenv == true`) — walk from `working_dir` (or cwd) to root, load all `.env` / `.env.yaml` / `.env.json` files, merge and expand `${VAR}` references. Vars are prepended to `env_add` so explicit entries take precedence. Uses [dotenv](https://github.com/BuildWithCollab/dotenv).
-2. **Resolve the program** — walk PATH, find full path
-3. **On Windows: MZ check** — read 2 bytes. `MZ` → `CreateProcessW` directly. Not `MZ` → wrap with `cmd /c`
-4. **Build env block** — copy parent (or start empty), apply add/remove. Child gets its own block; parent is never touched
-5. **Create pipes** — only for modes that need them
-6. **On Windows, interactive mode** (all streams inherit, not detached) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
-7. **Spawn** — `CreateProcessW` / `fork`+`execve`. Job object (Windows) or process group (Unix) for tree kill
-8. **Concurrent I/O** — stdin writes in a background thread to prevent deadlock with stdout/stderr reading
-9. **Return** — `run()` waits + returns `Result`. `spawn()` returns `RunningProcess` immediately
+### Windows
+
+- **Non-PE programs are wrapped with `cmd /c`.** `.bat`, `.cmd`, `.ps1`, and any other non-PE targets are handled transparently — you can spawn them by name the same way you'd spawn an `.exe`. The MZ magic check used to decide is exposed as `is_pe_executable` if you need it yourself.
+- **Console VT input is enabled for interactive children.** When all streams inherit and the mode is `Mode::interactive`, the console is reset with `ENABLE_VIRTUAL_TERMINAL_INPUT` so terminal tools that rely on escape sequences (PSReadLine `Ctrl+R`, etc.) behave correctly.
+
+## API Reference
+
+| Type | Purpose |
+|---|---|
+| `Command` | Fluent process builder |
+| `CommandConfig` | Plain-data process config (copyable, storable) |
+| `IoCallbacks` | Move-only stdout/stderr stream callbacks |
+| `Result` | Captured output + exit code from `run()` / `wait()` |
+| `RunningProcess` | RAII handle from `spawn()` — pid, wait, kill, detach |
+| `ProcessRef` | PID-based reconnect handle (best effort) |
+| `SpawnError` | Spawn-time failure kind + native errno |
+| `ModeError` | Thrown by `terminate()` / `interrupt()` on interactive handles |
+
+Free functions: `run()`, `spawn()`, `spawn_detached()`, `find_executable()`, `is_pe_executable()`.
+
+Everything lives in `<collab/process.hpp>` under the `collab::process` namespace. Read the headers in `include/collab/process/` for full method signatures and field-by-field docs.
 
 ## Building
 

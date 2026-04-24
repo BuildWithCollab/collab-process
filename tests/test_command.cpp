@@ -284,3 +284,69 @@ TEST_CASE("command: invalid program returns command_not_found", "[command]") {
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().kind == SpawnError::command_not_found);
 }
+
+// ── Mode builder ───────────────────────────────────────────────
+
+TEST_CASE("command: CommandConfig::mode defaults to interactive", "[command][mode]") {
+    CommandConfig cfg;
+    CHECK(cfg.mode == CommandConfig::Mode::interactive);
+}
+
+TEST_CASE("command: Command builder defaults to interactive", "[command][mode]") {
+    auto cmd = Command("x");
+    CHECK(cmd.config().mode == CommandConfig::Mode::interactive);
+}
+
+TEST_CASE("command: .interactive() sets Mode::interactive", "[command][mode]") {
+    auto cmd = Command("x").headless().interactive();
+    CHECK(cmd.config().mode == CommandConfig::Mode::interactive);
+}
+
+TEST_CASE("command: .headless() sets Mode::headless", "[command][mode]") {
+    auto cmd = Command("x").headless();
+    CHECK(cmd.config().mode == CommandConfig::Mode::headless);
+}
+
+TEST_CASE("command: later interactive() / headless() replaces earlier", "[command][mode]") {
+    auto cmd1 = Command("x").headless().interactive();
+    CHECK(cmd1.config().mode == CommandConfig::Mode::interactive);
+
+    auto cmd2 = Command("x").interactive().headless();
+    CHECK(cmd2.config().mode == CommandConfig::Mode::headless);
+}
+
+// ── Stream redirection does NOT change the mode ────────────────
+//
+// Regression guard for the inference bug this redesign fixed — a redirected
+// stream used to flip the child into a signal-isolated process group.
+
+TEST_CASE("command: stdout_capture alone leaves mode == interactive", "[command][mode]") {
+    auto cmd = Command("x").stdout_capture();
+    CHECK(cmd.config().mode == CommandConfig::Mode::interactive);
+}
+
+TEST_CASE("command: every non-inherit stream mode on its own leaves mode interactive", "[command][mode]") {
+    CHECK(Command("x").stdout_capture().config().mode == CommandConfig::Mode::interactive);
+    CHECK(Command("x").stdout_discard().config().mode == CommandConfig::Mode::interactive);
+    CHECK(Command("x").stderr_capture().config().mode == CommandConfig::Mode::interactive);
+    CHECK(Command("x").stderr_discard().config().mode == CommandConfig::Mode::interactive);
+    CHECK(Command("x").stderr_merge().config().mode == CommandConfig::Mode::interactive);
+    CHECK(Command("x").stdin_string("x").config().mode == CommandConfig::Mode::interactive);
+    CHECK(Command("x").stdin_close().config().mode == CommandConfig::Mode::interactive);
+}
+
+// ── Removed-surface compile check ──────────────────────────────
+//
+// Build-time guard that the deletions really happened — a future refactor
+// that accidentally re-adds either symbol fails here.
+
+template <typename T>
+concept HasSignalableField = requires (T t) { t.signalable; };
+
+template <typename T>
+concept HasSignalableMethod = requires (T t) { t.signalable(true); };
+
+static_assert(!HasSignalableField<CommandConfig>,
+    "CommandConfig::signalable must be removed");
+static_assert(!HasSignalableMethod<Command>,
+    "Command::signalable(bool) must be removed");

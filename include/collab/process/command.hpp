@@ -158,8 +158,13 @@ public:
         return std::forward<decltype(self)>(self);
     }
 
-    auto detached(this auto&& self) -> decltype(auto) {
-        self.config_.detached = true;
+    auto interactive(this auto&& self) -> decltype(auto) {
+        self.config_.mode = CommandConfig::Mode::interactive;
+        return std::forward<decltype(self)>(self);
+    }
+
+    auto headless(this auto&& self) -> decltype(auto) {
+        self.config_.mode = CommandConfig::Mode::headless;
         return std::forward<decltype(self)>(self);
     }
 
@@ -173,6 +178,10 @@ public:
     auto run(this Command&& self) -> std::expected<Result, SpawnError>;
     auto spawn(this Command&& self) -> std::expected<RunningProcess, SpawnError>;
     auto spawn_detached(this Command&& self) -> std::expected<int, SpawnError>;
+
+    // -- Introspection (does not consume) --
+
+    auto config() const -> const CommandConfig& { return config_; }
 };
 
 }  // namespace collab::process

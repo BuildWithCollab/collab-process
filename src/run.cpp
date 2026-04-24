@@ -8,6 +8,13 @@
 
 namespace collab::process {
 
+// Headless → child gets its own process group (code drives SIGINT/SIGTERM).
+// Interactive → child shares parent's pgrp (terminal drives signals).
+// Direct read of config.mode — no inference from stream modes.
+static bool resolve_headless(const CommandConfig& config) {
+    return config.mode == CommandConfig::Mode::headless;
+}
+
 // When dotenv is enabled, load .env files and prepend vars to env_add.
 // Prepending means explicit env_add entries take precedence over .env values.
 static void apply_dotenv(CommandConfig& config) {
@@ -62,7 +69,7 @@ auto run(CommandConfig config, IoCallbacks callbacks)
         .stdin_mode = config.stdin_mode,
         .stdin_content = std::move(config.stdin_content),
         .stdin_path = std::move(config.stdin_path),
-        .detached = config.detached,
+        .headless = resolve_headless(config),
         .needs_cmd_wrapper = needs_cmd_wrapper,
         .on_stdout = std::move(callbacks.on_stdout),
         .on_stderr = std::move(callbacks.on_stderr),
@@ -114,7 +121,7 @@ auto spawn(CommandConfig config, IoCallbacks callbacks)
         .stdin_mode = config.stdin_mode,
         .stdin_content = std::move(config.stdin_content),
         .stdin_path = std::move(config.stdin_path),
-        .detached = config.detached,
+        .headless = resolve_headless(config),
         .needs_cmd_wrapper = needs_cmd_wrapper,
         .on_stdout = std::move(callbacks.on_stdout),
         .on_stderr = std::move(callbacks.on_stderr),
@@ -129,6 +136,11 @@ auto spawn(CommandConfig config, IoCallbacks callbacks)
 
 auto spawn_detached(CommandConfig config, IoCallbacks callbacks)
     -> std::expected<int, SpawnError> {
+    // A detached child must not share the parent's process group — otherwise
+    // a terminal Ctrl+C aimed at the dying parent's pgrp lands on the child
+    // the caller explicitly asked to keep running (the opposite of the
+    // fire-and-forget intent). Force headless regardless of caller's mode.
+    config.mode = CommandConfig::Mode::headless;
     auto proc = spawn(std::move(config), std::move(callbacks));
     if (!proc)
         return std::unexpected(proc.error());

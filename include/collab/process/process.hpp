@@ -4,6 +4,7 @@
 
 #include "collab/process/command.hpp"
 #include "collab/process/command_config.hpp"
+#include "collab/process/mode_error.hpp"
 #include "collab/process/process_ref.hpp"
 #include "collab/process/result.hpp"
 #include "collab/process/running_process.hpp"

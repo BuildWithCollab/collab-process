@@ -25,10 +25,8 @@ auto RunningProcess::wait_for(std::chrono::milliseconds timeout)
     return impl_->wait_for(timeout);
 }
 
-auto RunningProcess::stop(std::chrono::milliseconds grace) -> StopResult {
-    return impl_->stop(grace);
-}
-
+auto RunningProcess::terminate() -> bool { return impl_->terminate(); }
+auto RunningProcess::interrupt() -> bool { return impl_->interrupt(); }
 auto RunningProcess::kill() -> bool { return impl_->kill(); }
 
 auto RunningProcess::detach(this RunningProcess&& self) -> int {

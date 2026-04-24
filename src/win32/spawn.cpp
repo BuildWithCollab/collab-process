@@ -1,9 +1,13 @@
 #include "../platform.hpp"
 #include "../running_process_impl.hpp"
 
+#include "collab/process/mode_error.hpp"
+
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -19,12 +23,33 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     HANDLE job_handle = nullptr;
     int process_id = 0;
 
+    // Set before CreateProcess, tracks whether CREATE_NEW_PROCESS_GROUP was
+    // applied (i.e. the child was spawned headless).
+    // GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) only has a valid
+    // target when pid names a process-group leader, and Windows does *not*
+    // reliably return zero for non-leaders — the call can succeed while
+    // delivering the signal nowhere. terminate()/interrupt() throw
+    // ModeError when this is false rather than lying about delivery.
+    bool has_own_group = false;
+
     // Pipes for captured output
     HANDLE stdout_read = nullptr;
     HANDLE stderr_read = nullptr;
 
     // Stdin writer thread — joined before reading pipes or destroying
     std::thread stdin_thread;
+
+    // Background pipe readers — started at spawn time when we own at least
+    // one read pipe. Fires on_stdout/on_stderr callbacks live and appends
+    // to stdout_content / stderr_content as data arrives, so users can
+    // observe output from a spawn()ed process without calling wait().
+    //
+    // Split per stream (not a single thread that fans out) so detach() can
+    // wake each with CancelSynchronousIo on its native handle — necessary
+    // because CancelIoEx returns ERROR_NOT_FOUND for synchronous ReadFile
+    // on anonymous pipes.
+    std::thread stdout_reader_thread;
+    std::thread stderr_reader_thread;
 
     // Callbacks
     collab::process::move_only_function<void(std::string_view)> on_stdout;
@@ -40,9 +65,19 @@ struct Win32ProcessImpl : RunningProcess::Impl {
             stdin_thread.join();
     }
 
+    void join_pipe_readers() {
+        if (stdout_reader_thread.joinable())
+            stdout_reader_thread.join();
+        if (stderr_reader_thread.joinable())
+            stderr_reader_thread.join();
+    }
+
     ~Win32ProcessImpl() override {
-        // Ensure stdin writer has finished before closing handles
+        // Ensure I/O threads have finished before closing handles — the
+        // readers' ReadFile must complete (via EOF when the process exits
+        // or cancellation in release_for_detach) before we tear down.
         join_stdin_thread();
+        join_pipe_readers();
         if (stdout_read) CloseHandle(stdout_read);
         if (stderr_read) CloseHandle(stderr_read);
         if (process_handle) CloseHandle(process_handle);
@@ -58,31 +93,16 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         return exit_code == STILL_ACTIVE;
     }
 
-    void read_pipes() {
-        // Read stdout
-        auto read_handle = [](HANDLE h, std::string& out,
-                              collab::process::move_only_function<void(std::string_view)>& cb) {
-            if (!h) return;
-            char buf[4096];
-            DWORD bytes_read;
-            while (ReadFile(h, buf, sizeof(buf), &bytes_read, nullptr) && bytes_read > 0) {
-                std::string_view chunk(buf, bytes_read);
-                if (cb) cb(chunk);
-                out.append(chunk);
-            }
-        };
-
-        // If we have both stdout and stderr pipes, read them concurrently
-        // to avoid deadlock
-        if (stdout_read && stderr_read) {
-            std::thread stderr_thread([&] {
-                read_handle(stderr_read, stderr_content, on_stderr);
-            });
-            read_handle(stdout_read, stdout_content, on_stdout);
-            stderr_thread.join();
-        } else {
-            read_handle(stdout_read, stdout_content, on_stdout);
-            read_handle(stderr_read, stderr_content, on_stderr);
+    static void read_one_pipe(
+        HANDLE h, std::string& out,
+        collab::process::move_only_function<void(std::string_view)>& cb) {
+        if (!h) return;
+        char buf[4096];
+        DWORD bytes_read;
+        while (ReadFile(h, buf, sizeof(buf), &bytes_read, nullptr) && bytes_read > 0) {
+            std::string_view chunk(buf, bytes_read);
+            if (cb) cb(chunk);
+            out.append(chunk);
         }
     }
 
@@ -92,8 +112,10 @@ struct Win32ProcessImpl : RunningProcess::Impl {
 
         if (!waited) {
             join_stdin_thread();
-            read_pipes();
             WaitForSingleObject(process_handle, INFINITE);
+            // Reader threads (if any) exit once the child closes its
+            // write-ends of the pipes, which happens on process exit.
+            join_pipe_readers();
             waited = true;
         }
 
@@ -129,9 +151,9 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         if (wait_result == WAIT_TIMEOUT)
             return std::nullopt;
 
-        // Process exited — safe to drain pipes now
+        // Process exited — reader thread has seen / will imminently see EOF.
         if (!waited) {
-            read_pipes();
+            join_pipe_readers();
             waited = true;
         }
 
@@ -153,18 +175,12 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         };
     }
 
-    // Used by run() — reads pipes concurrently to avoid deadlock with
-    // processes that produce large output, and kills on timeout.
+    // Used by run() — kills the process on timeout. The background reader
+    // started at spawn time prevents deadlock when the child fills the
+    // pipe buffer (child blocks writing, parent blocks waiting).
     auto wait_for_and_kill(std::chrono::milliseconds timeout) -> std::expected<Result, SpawnError> override {
         if (!process_handle)
             return std::unexpected(SpawnError{SpawnError::platform_error, 0});
-
-        // Start pipe reader concurrently — prevents deadlock when the child
-        // fills the pipe buffer (child blocks writing, parent blocks waiting).
-        std::thread pipe_reader;
-        if (!waited) {
-            pipe_reader = std::thread([this] { read_pipes(); });
-        }
 
         DWORD wait_ms = static_cast<DWORD>(timeout.count());
         DWORD wait_result = WaitForSingleObject(process_handle, wait_ms);
@@ -177,10 +193,8 @@ struct Win32ProcessImpl : RunningProcess::Impl {
                 TerminateProcess(process_handle, 1);
             WaitForSingleObject(process_handle, 5000);
 
-            if (pipe_reader.joinable()) {
-                pipe_reader.join();
-                waited = true;
-            }
+            join_pipe_readers();
+            waited = true;
 
             auto trim = [](std::string& s) {
                 while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
@@ -198,10 +212,8 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         }
 
         // Process exited within timeout — pipe reader finishes naturally
-        if (pipe_reader.joinable()) {
-            pipe_reader.join();
-            waited = true;
-        }
+        join_pipe_readers();
+        waited = true;
 
         DWORD exit_code = 0;
         GetExitCodeProcess(process_handle, &exit_code);
@@ -221,27 +233,30 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         };
     }
 
-    auto stop(std::chrono::milliseconds grace) -> StopResult override {
-        if (!is_alive()) return StopResult::not_running;
+    auto terminate() -> bool override {
+        // CTRL_BREAK_EVENT's second parameter is a process-group ID. A pid
+        // only names a group when the process was spawned headless
+        // (CREATE_NEW_PROCESS_GROUP). Interactive children share the
+        // parent's console group — the terminal owns their signals, not
+        // us. Calling terminate() on such a handle is a contract violation;
+        // throw rather than silently returning false.
+        if (!has_own_group)
+            throw ModeError("collab::process: terminate() requires headless mode");
+        if (!is_alive()) return false;
+        return GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
+                                        static_cast<DWORD>(process_id)) != 0;
+    }
 
-        // Send CTRL_BREAK to the process group
-        GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, process_id);
-
-        // Wait for grace period
-        DWORD wait_result = WaitForSingleObject(
-            process_handle, static_cast<DWORD>(grace.count()));
-
-        if (wait_result == WAIT_OBJECT_0)
-            return StopResult::stopped_gracefully;
-
-        // Escalate — terminate the job (tree kill)
-        if (job_handle)
-            TerminateJobObject(job_handle, 1);
-        else
-            TerminateProcess(process_handle, 1);
-
-        WaitForSingleObject(process_handle, 5000);
-        return StopResult::killed;
+    auto interrupt() -> bool override {
+        // Same mode contract as terminate(): interrupting an interactive
+        // child is a programming error (terminal owns its signals).
+        if (!has_own_group)
+            throw ModeError("collab::process: interrupt() requires headless mode");
+        // Even in headless mode, Windows offers no viable mapping —
+        // CTRL_C_EVENT broadcasts to the whole console (would hit the
+        // parent too) and is disabled for processes in a new process group
+        // per MSDN. Honest "not delivered" return.
+        return false;
     }
 
     auto kill() -> bool override {
@@ -261,6 +276,29 @@ struct Win32ProcessImpl : RunningProcess::Impl {
             SetInformationJobObject(job_handle, JobObjectExtendedLimitInformation,
                                     &job_info, sizeof(job_info));
         }
+
+        // Wake the reader threads by closing the pipe read handles.
+        //
+        // Anonymous-pipe synchronous ReadFile cannot be cancelled by either
+        // CancelIoEx (returns ERROR_NOT_FOUND — it only covers async I/O)
+        // or CancelSynchronousIo (also ERROR_NOT_FOUND — the pipe driver
+        // does not register sync reads in the per-thread cancel table).
+        // Closing the handle from this thread is technically UB per MSDN,
+        // but in practice on Windows the in-flight ReadFile returns with
+        // an error and the reader thread exits cleanly — which is exactly
+        // what we need so ~Win32ProcessImpl can join and destroy safely.
+        //
+        // Null out the members before closing so the destructor's
+        // CloseHandle(…) calls don't double-close.
+        HANDLE out_closing = stdout_read;
+        HANDLE err_closing = stderr_read;
+        stdout_read = nullptr;
+        stderr_read = nullptr;
+        if (out_closing) CloseHandle(out_closing);
+        if (err_closing) CloseHandle(err_closing);
+
+        if (stdout_reader_thread.joinable()) stdout_reader_thread.join();
+        if (stderr_reader_thread.joinable()) stderr_reader_thread.join();
     }
 };
 
@@ -317,12 +355,17 @@ auto platform_spawn(SpawnParams params)
     auto impl = std::make_unique<Win32ProcessImpl>();
     impl->on_stdout = std::move(params.on_stdout);
     impl->on_stderr = std::move(params.on_stderr);
+    impl->has_own_group = params.headless;
 
-    // Determine if interactive (all streams inherit, not detached)
+    // Console-inherit path: all streams inherit AND the child is interactive
+    // (not headless) — the child shares the parent's console and process
+    // group, so Ctrl+C routes naturally. Headless children get
+    // CREATE_NEW_PROCESS_GROUP, which breaks shared-console setup
+    // (foreground group tracking etc.).
     bool is_interactive = (params.stdout_mode == CommandConfig::OutputMode::inherit)
         && (params.stderr_mode == CommandConfig::OutputMode::inherit)
         && (params.stdin_mode == CommandConfig::StdinMode::inherit)
-        && !params.detached;
+        && !params.headless;
 
     if (is_interactive)
         reset_console_for_interactive();
@@ -384,9 +427,16 @@ auto platform_spawn(SpawnParams params)
                                &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     }
 
-    // Setup STARTUPINFO
-    STARTUPINFOW si = {};
-    si.cb = sizeof(si);
+    // Setup STARTUPINFOEX — we use the extended form so we can scope
+    // inheritance to an explicit handle list below. Without that list,
+    // CreateProcessW(bInheritHandles=TRUE) hands the child every inheritable
+    // handle in *our* address space — including pipes our own parent opened
+    // for us. Those grandparent pipes then keep the grandparent's pipe
+    // readers waiting on EOF until the grandchild exits, which manifests as
+    // wait() blocking on unrelated long-running detached processes.
+    STARTUPINFOEXW siex = {};
+    siex.StartupInfo.cb = sizeof(siex);
+    STARTUPINFOW& si = siex.StartupInfo;
 
     if (!is_interactive) {
         si.dwFlags = STARTF_USESTDHANDLES;
@@ -421,10 +471,15 @@ auto platform_spawn(SpawnParams params)
         : params.working_dir.c_str();
 
     // Creation flags
-    DWORD flags = 0;
-    if (!is_interactive)
+    DWORD flags = EXTENDED_STARTUPINFO_PRESENT;
+    // CREATE_NO_WINDOW hides the child's console window — but it also
+    // effectively detaches the child's console enough that a parent
+    // GenerateConsoleCtrlEvent cannot reach it. Headless children need
+    // that console reachability to receive CTRL_BREAK later, so keep the
+    // shared console in that case.
+    if (!is_interactive && !params.headless)
         flags |= CREATE_NO_WINDOW;
-    if (params.detached)
+    if (params.headless)
         flags |= CREATE_NEW_PROCESS_GROUP;
     flags |= CREATE_UNICODE_ENVIRONMENT;
 
@@ -437,6 +492,62 @@ auto platform_spawn(SpawnParams params)
                                 &job_info, sizeof(job_info));
     }
 
+    // Build the handle-inheritance whitelist.
+    //
+    // For the non-interactive path every handle the child needs is one we
+    // put in STARTUPINFO explicitly — list exactly those. For the
+    // interactive path the child shares our console and we don't set
+    // STARTF_USESTDHANDLES; still need to list our std handles so they
+    // survive the attribute-list filter (an empty list would inherit
+    // nothing and the child would see no stdin/stdout/stderr).
+    std::vector<HANDLE> inherit_handles;
+    auto add_handle = [&](HANDLE h) {
+        if (h && h != INVALID_HANDLE_VALUE)
+            inherit_handles.push_back(h);
+    };
+    if (is_interactive) {
+        add_handle(GetStdHandle(STD_INPUT_HANDLE));
+        add_handle(GetStdHandle(STD_OUTPUT_HANDLE));
+        add_handle(GetStdHandle(STD_ERROR_HANDLE));
+    } else {
+        add_handle(si.hStdInput);
+        add_handle(si.hStdOutput);
+        add_handle(si.hStdError);
+    }
+    // Deduplicate — UpdateProcThreadAttribute rejects duplicates (common
+    // when stderr_merge routes stderr through the stdout pipe or both
+    // streams point at the same NUL handle).
+    std::sort(inherit_handles.begin(), inherit_handles.end());
+    inherit_handles.erase(
+        std::unique(inherit_handles.begin(), inherit_handles.end()),
+        inherit_handles.end());
+
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    auto attr_buf = std::make_unique<BYTE[]>(attr_size);
+    auto attr_list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.get());
+    if (!InitializeProcThreadAttributeList(attr_list, 1, 0, &attr_size)) {
+        int err = static_cast<int>(GetLastError());
+        if (stdin_read) CloseHandle(stdin_read);
+        if (stdout_write) CloseHandle(stdout_write);
+        if (stderr_write) CloseHandle(stderr_write);
+        if (nul_write) CloseHandle(nul_write);
+        if (nul_read) CloseHandle(nul_read);
+        if (stdin_write) CloseHandle(stdin_write);
+        if (stdout_read_h) CloseHandle(stdout_read_h);
+        if (stderr_read_h) CloseHandle(stderr_read_h);
+        if (job) CloseHandle(job);
+        return std::unexpected(SpawnError{SpawnError::platform_error, err});
+    }
+    if (!inherit_handles.empty()) {
+        UpdateProcThreadAttribute(
+            attr_list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherit_handles.data(),
+            inherit_handles.size() * sizeof(HANDLE),
+            nullptr, nullptr);
+    }
+    siex.lpAttributeList = attr_list;
+
     // Spawn
     PROCESS_INFORMATION pi = {};
     BOOL ok = CreateProcessW(
@@ -447,8 +558,10 @@ auto platform_spawn(SpawnParams params)
         flags,
         env_block.data(),
         cwd,
-        &si, &pi
+        &siex.StartupInfo, &pi
     );
+
+    DeleteProcThreadAttributeList(attr_list);
 
     // Cleanup write-side handles and NUL handles (child has them now)
     if (stdin_read) CloseHandle(stdin_read);
@@ -507,6 +620,25 @@ auto platform_spawn(SpawnParams params)
     impl->process_id = static_cast<int>(pi.dwProcessId);
     impl->stdout_read = stdout_read_h;
     impl->stderr_read = stderr_read_h;
+
+    // Live pipe reader — fulfills the IoCallbacks contract that callbacks
+    // fire "as data arrives" (not "when wait() happens to drain"). Only
+    // start it when the child will actually write to one of our pipes:
+    // discard mode creates a pipe too but routes the child's stdout/stderr
+    // to NUL, so a reader would block on ReadFile forever.
+    // One thread per captured stream so each can be cancelled individually
+    // via CancelSynchronousIo (see release_for_detach).
+    Win32ProcessImpl* raw = impl.get();
+    if (params.stdout_mode == CommandConfig::OutputMode::capture) {
+        impl->stdout_reader_thread = std::thread([raw] {
+            Win32ProcessImpl::read_one_pipe(raw->stdout_read, raw->stdout_content, raw->on_stdout);
+        });
+    }
+    if (params.stderr_mode == CommandConfig::OutputMode::capture) {
+        impl->stderr_reader_thread = std::thread([raw] {
+            Win32ProcessImpl::read_one_pipe(raw->stderr_read, raw->stderr_content, raw->on_stderr);
+        });
+    }
 
     return impl;
 }

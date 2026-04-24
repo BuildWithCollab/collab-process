@@ -27,12 +27,33 @@ public:
     auto wait() -> std::expected<Result, SpawnError>;
     auto wait_for(std::chrono::milliseconds timeout) -> std::optional<Result>;
 
-    // Graceful: SIGTERM → grace → SIGKILL (Unix)
-    //           CTRL_BREAK → grace → TerminateProcess (Windows)
-    // Kills entire process tree via job object / process group.
-    auto stop(std::chrono::milliseconds grace = std::chrono::seconds{5}) -> StopResult;
+    // Bool contract, shared across terminate/interrupt/kill:
+    //   true  — the signal was delivered.
+    //   false — the signal was not delivered (process already gone, syscall
+    //           failed, or the platform has no mapping for this signal).
+    // That is the only meaning of the bool.
+    //
+    // Mode contract, specific to terminate/interrupt:
+    //   Interactive-mode children share the parent's process group; the
+    //   terminal owns their signals. Calling terminate() or interrupt() on
+    //   an interactive handle is a contract violation and throws ModeError
+    //   — the bool is reserved for "was the signal delivered?", not "are
+    //   you allowed to call this method?". kill() is unconditional so RAII
+    //   teardown works in both modes.
 
-    // Immediate tree kill.
+    // Send a termination request. No waiting, no escalation — compose with
+    // wait_for()/kill() yourself. Requires CommandConfig::Mode::headless
+    // (or Command::headless() on the builder); throws ModeError if the
+    // child was spawned interactive.
+    auto terminate() -> bool;
+
+    // Send an interrupt request. Requires headless mode (throws ModeError
+    // otherwise). On Windows even in headless mode always returns false:
+    // CTRL_C_EVENT can only target the whole console and is disabled for
+    // processes in a new process group per MSDN.
+    auto interrupt() -> bool;
+
+    // Immediate tree kill. Works in both modes — needed for RAII teardown.
     auto kill() -> bool;
 
     // Release ownership — child survives. Returns PID for reconnection
