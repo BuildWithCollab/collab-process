@@ -1,6 +1,7 @@
 #include "../platform.hpp"
 #include "../running_process_impl.hpp"
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -54,15 +55,17 @@ namespace collab::process::detail {
 
 // POSIX guarantees writes ≤ PIPE_BUF are atomic; all our messages are
 // well under that. We write the whole message in a single ::write() call.
-struct alignas(1) InfoMsgSpawnOk {
+// Packed: the library reads tag (1 byte) then the payload field(s) — any
+// compiler-inserted padding between them would desync the wire format.
+struct [[gnu::packed]] InfoMsgSpawnOk {
     unsigned char tag;  // 0
     pid_t target_pid;
 };
-struct alignas(1) InfoMsgSpawnError {
+struct [[gnu::packed]] InfoMsgSpawnError {
     unsigned char tag;  // 1
     int native_errno;
 };
-struct alignas(1) InfoMsgExit {
+struct [[gnu::packed]] InfoMsgExit {
     unsigned char tag;  // 2
     int flag;           // 0 = normal, 1 = signalled
     int payload;        // exit code or signal number
@@ -193,7 +196,13 @@ static auto read_all(int fd, void* buf, size_t n) -> bool {
         // Release wins over lifecycle when both land in the same epoch
         // (library wrote the release byte, then died). User intent was
         // detach, not tear-down.
-        if (fds[1].revents & (POLLIN | POLLHUP)) {
+        //
+        // Require POLLIN on the release pipe — a byte actually landed.
+        // POLLHUP alone means the library closed the release pipe without
+        // writing (abrupt death: kernel closed all fds on process exit).
+        // In that case fds[0] will also report POLLHUP and we want the
+        // lifecycle branch below to fire so the target gets killed.
+        if (fds[1].revents & POLLIN) {
             // detach() — let the target go.
             (void)::close(info_write);
             _exit(0);
@@ -255,6 +264,13 @@ struct UnixProcessImpl : RunningProcess::Impl {
 
     std::thread pipe_reader_thread;
 
+    // Asks the reader to stop and return. Set during release_for_detach so the
+    // reader doesn't block forever waiting on a pipe whose write end is held
+    // by a target we've just handed off. close(fd) from another thread is not
+    // guaranteed to wake a blocked read() on Linux, so we poll() with a short
+    // timeout instead and check this flag.
+    std::atomic<bool> reader_shutdown{false};
+
     void join_pipe_reader() {
         if (pipe_reader_thread.joinable())
             pipe_reader_thread.join();
@@ -309,15 +325,38 @@ struct UnixProcessImpl : RunningProcess::Impl {
     }
 
     void read_pipes() {
-        auto read_fd = [](int fd, std::string& out,
-                          collab::process::move_only_function<void(std::string_view)>& cb) {
+        // poll()+read() instead of bare read(): on Linux, close(fd) from
+        // another thread does not reliably interrupt a blocked read() — if
+        // release_for_detach's close happens after the reader has already
+        // entered the read syscall, the read stays parked on the file
+        // description. Polling with a short timeout lets us notice
+        // reader_shutdown in bounded time so the caller's join returns.
+        auto read_fd = [this](int fd, std::string& out,
+                              collab::process::move_only_function<void(std::string_view)>& cb) {
             if (fd < 0) return;
             char buf[4096];
-            ssize_t n;
-            while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
-                std::string_view chunk(buf, n);
-                if (cb) cb(chunk);
-                out.append(chunk);
+            for (;;) {
+                if (reader_shutdown.load(std::memory_order_acquire)) return;
+                pollfd pfd{fd, POLLIN, 0};
+                int pr = ::poll(&pfd, 1, 50);
+                if (pr < 0) {
+                    if (errno == EINTR) continue;
+                    return;
+                }
+                if (pr == 0) continue;  // timeout — re-check shutdown
+                if (pfd.revents & POLLIN) {
+                    ssize_t n = ::read(fd, buf, sizeof(buf));
+                    if (n > 0) {
+                        std::string_view chunk(buf, n);
+                        if (cb) cb(chunk);
+                        out.append(chunk);
+                        continue;
+                    }
+                    if (n < 0 && errno == EINTR) continue;
+                    return;  // n == 0 (EOF) or hard error
+                }
+                // POLLHUP without POLLIN: writer closed, no more data.
+                if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) return;
             }
         };
 
@@ -481,14 +520,17 @@ struct UnixProcessImpl : RunningProcess::Impl {
         if (lifecycle_fd >= 0) { ::close(lifecycle_fd); lifecycle_fd = -1; }
         if (info_fd >= 0)      { ::close(info_fd);      info_fd      = -1; }
 
-        // Reader would block on the detached child's pipes forever — close
-        // our read ends so the blocked read unblocks, then join. Matches
-        // the pre-supervisor behavior.
+        // Reader would block on the detached child's pipes forever — the
+        // target still holds the write end so there's no EOF coming. Signal
+        // the poll()+read() loop to stop, then join. Only close our read
+        // ends *after* the reader has exited (closing while the reader is
+        // parked in read() is a no-op on Linux).
         if (pipe_reader_thread.joinable()) {
-            if (stdout_fd >= 0) { ::close(stdout_fd); stdout_fd = -1; }
-            if (stderr_fd >= 0) { ::close(stderr_fd); stderr_fd = -1; }
+            reader_shutdown.store(true, std::memory_order_release);
             pipe_reader_thread.join();
         }
+        if (stdout_fd >= 0) { ::close(stdout_fd); stdout_fd = -1; }
+        if (stderr_fd >= 0) { ::close(stderr_fd); stderr_fd = -1; }
         waited = true;
     }
 };
