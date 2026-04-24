@@ -44,10 +44,14 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
 
 ```cpp
 #include <collab/process.hpp>
+
 using namespace collab::process;
 
-// Fluent: capture git status output
-auto result = Command("git").args({"status", "--porcelain"}).stdout_capture().run();
+auto result = Command("git")
+    .args({"log", "--oneline", "-5"})
+    .stdout_capture()
+    .run();
+
 if (result && result->ok())
     std::cout << result->stdout_content;
 ```
@@ -57,7 +61,7 @@ Or as a plain struct, when things get decided at runtime:
 ```cpp
 CommandConfig config;
 config.program = "git";
-config.args = {"status", "--porcelain"};
+config.args = {"log", "--oneline", "-5"};
 config.stdout_mode = CommandConfig::OutputMode::capture;
 
 auto result = run(config);
@@ -193,7 +197,11 @@ Each recipe is self-contained. `using namespace collab::process;` is assumed. Ev
 Block on the child and read the captured output afterwards:
 
 ```cpp
-auto result = Command("git").args({"status", "--porcelain"}).stdout_capture().run();
+auto result = Command("git")
+    .args({"log", "--oneline", "-5"})
+    .stdout_capture()
+    .run();
+
 if (result && result->ok())
     std::cout << result->stdout_content;
 ```
