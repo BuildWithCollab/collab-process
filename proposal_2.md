@@ -35,12 +35,49 @@ supervisor; the grandchild `execve`s the target binary.
 ```
 library code ──fork──▶  supervisor  ──fork──▶  target (execve)
       │                      │
-      │◀── lifecycle pipe ───┤
+      │◀── info pipe ────────┤   (one-shot: target PID or spawn error)
       │                      │
-      │◀── release pipe  ────┤
+      │◀── lifecycle pipe ───┤   (EOF when library dies)
+      │                      │
+      │─── release pipe ────▶┤   (one byte when detach() is called)
 ```
 
-The supervisor runs a `poll()` loop watching three events:
+**File descriptor hygiene.** All library-created pipes (stdio, info,
+lifecycle, release, and the exec-probe below) are opened with
+`O_CLOEXEC` via `pipe2`. The existing `pipe()` calls at
+`src/unix/spawn.cpp:220, 226, 233` become `pipe2(..., O_CLOEXEC)`. The
+grandchild's `dup2` of its stdio ends into `0`/`1`/`2` clears
+`O_CLOEXEC` on the destination fds, so the target inherits
+stdin/stdout/stderr and nothing else. No post-fork FD-table walk, no
+`closefrom` loop — the flag does the work. This is load-bearing:
+without it, the target can inherit the lifecycle pipe's write end and
+the supervisor will never see EOF on library death.
+
+**Detecting `execve` failure.** `execve` happens in the grandchild,
+after the supervisor has already returned from its second `fork`. The
+grandchild creates a CLOEXEC exec-probe pipe (`pipe2(fd, O_CLOEXEC)`)
+before `execve`:
+
+- Successful `execve` → kernel atomically closes the write end →
+  supervisor reads EOF from the probe → execve succeeded.
+- Failed `execve` → grandchild writes `errno` to the probe, `_exit`s →
+  supervisor reads the errno → execve failed.
+
+**Info pipe wire format.** After the supervisor learns the outcome
+(either its own `fork` errno or the grandchild's reported `execve`
+errno), it writes one framed message to the info pipe and closes it:
+
+- tag byte `0` (ok) — followed by `pid_t` target PID
+- tag byte `1` (error) — followed by `int` errno
+
+POSIX guarantees writes ≤ `PIPE_BUF` are atomic, so the single `write()`
+of this message is all-or-nothing. The library reads it synchronously
+before returning from `spawn()`. On error it returns
+`std::unexpected(SpawnError{...})`; callers cannot distinguish
+fork-failure from execve-failure, which matches today's `run()`/`spawn()`
+semantics. On success it stores the target PID in `RunningProcess`.
+
+The supervisor then enters a `poll()` loop watching three events:
 
 1. **Lifecycle pipe EOF** — library process died (any cause, including
    `SIGKILL`). Supervisor sends `SIGKILL` to the target, `waitpid`s it,
@@ -49,9 +86,15 @@ The supervisor runs a `poll()` loop watching three events:
    Supervisor stops watching, `_exit(0)` without touching the target.
    Target reparents to PID 1 and continues running. This is the `detach()`
    semantic working correctly.
-3. **Target exits on its own** — supervisor `waitpid`s it, then `_exit`s
-   with the target's exit status encoded (so the library can recover it
-   by `waitpid`ing the supervisor).
+3. **Target exits on its own** — supervisor `waitpid`s it. If the target
+   died from a signal, supervisor `raise`s the same signal on itself. If
+   the target exited normally, supervisor `_exit(code)`s with the same
+   code. The library's existing `WIFSIGNALED` → `128 + sig` and
+   `WIFEXITED` unpacking works unchanged.
+
+If `poll()` reports release-readable and lifecycle-EOF in the same
+epoch (library wrote to the release pipe then died before the supervisor
+scheduled), release wins — user intent was detach, not tear-down.
 
 The supervisor never `execve`s. It stays our code, so we can talk to it.
 
@@ -83,13 +126,18 @@ breaking real use cases:
 All three need `detach()` to actually detach. A supervisor can be told
 things (via the release pipe) after the fact. `prctl` cannot.
 
-The tradeoff is real — `prctl` is kernel-enforced and cannot be defeated
-by OOM-killing our supervisor, while a supervisor is userspace and has
-its own failure modes. Robustness of the orphan-prevention primitive
-slightly favors `prctl`. API-contract uniformity across platforms
-strongly favors supervisor. Uniformity wins: "`detach()` silently doesn't
-work on Linux" is a worse lie than "supervisor could theoretically get
-OOM-killed on a system already in crisis."
+`prctl` is kernel-enforced and cannot be defeated by killing a userspace
+process. A supervisor can be: if the OOM killer picks it, the supervisor
+dies without SIGKILL'ing the target, and if the library subsequently dies
+the target orphans. Accepted as a known residual limitation — the
+library does not touch `oom_score_adj` (supervisor is not a critical
+system service, and lowering the score below `0` without
+`CAP_SYS_RESOURCE` is blocked by the kernel anyway).
+
+Pure orphan-prevention robustness favors `prctl`. `detach()` after
+`spawn()` is only supported by a supervisor. This proposal picks
+supervisor because the `detach()` contract is load-bearing for the three
+use cases listed above.
 
 ### Public API impact
 
@@ -161,16 +209,20 @@ That is the only meaning of the bool. No other conditions are encoded in
 it. This is a documentation change plus the `kill()` fix above to make
 the implementation match.
 
-### `spawn_detached()` forces own process group
+### `spawn_detached()` always places the target in its own process group
 
-`spawn_detached()` (`src/run.cpp:142`) is currently `spawn() + detach()`
-and inherits the user's `signalable` inference/override. With default
-settings (all streams inherit, no explicit `signalable`), the target ends
-up in the parent's process group — so terminal Ctrl+C reaches the
-"detached" child while the parent is still alive. That contradicts the
-explicit fire-and-forget intent of `spawn_detached()`.
+**Contract.** A detached child must not share the parent's process
+group. Otherwise terminal Ctrl+C aimed at the dying parent's pgrp lands
+on a child the caller explicitly asked to keep running — the opposite
+of the fire-and-forget intent.
 
-Fix: override the flag at the `spawn_detached()` boundary.
+**Current bug.** `spawn_detached()` (`src/run.cpp:142`) is
+`spawn() + detach()` and inherits the `signalable` inference. With
+default settings (all streams inherit, no explicit `signalable`), the
+inference returns false → target shares parent's pgrp → terminal Ctrl+C
+hits it.
+
+**Fix.** Override the flag at the `spawn_detached()` boundary.
 
 ```cpp
 auto spawn_detached(CommandConfig config, IoCallbacks callbacks)
@@ -282,11 +334,23 @@ TEST "Unix: spawn_detached() child is in its own process group"
     ::kill(pid, SIGKILL);
 
 TEST "Unix: SIGINT to parent's process group does NOT reach spawn_detached() child"
-    int pid = Command(test_helper).args({"sleep","5s"}).spawn_detached().value();
-    ::kill(0, SIGINT);                     // parent's pgrp only
-    std::this_thread::sleep_for(200ms);
-    CHECK(pid_is_alive(pid));
-    ::kill(pid, SIGKILL);
+    // kill(0, SIGINT) hits the caller's pgrp — which includes the test
+    // runner. Isolate via a throwaway forked parent in its own pgrp so
+    // only that process takes the hit.
+    pid_t throwaway = fork();
+    if (throwaway == 0) {
+        setpgid(0, 0);                      // own pgrp
+        int target = Command(test_helper).args({"sleep","5s"})
+            .spawn_detached().value();
+        write_pid_to_pipe(target);          // hand target pid back to the test
+        ::kill(0, SIGINT);                  // hits this throwaway's pgrp only
+        std::this_thread::sleep_for(200ms);
+        _exit(0);
+    }
+    pid_t target_pid = read_pid_from_pipe();
+    waitpid(throwaway, nullptr, 0);
+    CHECK(pid_is_alive(target_pid));        // detached child survived
+    ::kill(target_pid, SIGKILL);            // cleanup
 ```
 
 ### API surface unchanged
