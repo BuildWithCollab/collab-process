@@ -287,8 +287,12 @@ class RunningProcess {
     // Does NOT kill the process on timeout.
     auto wait_for(std::chrono::milliseconds timeout) -> std::optional<Result>;
 
-    // One-shot signal primitives. Each returns true iff the underlying
-    // syscall succeeded — no waiting, no escalation, no combined operations.
+    // One-shot signal primitives — no waiting, no escalation, no combined
+    // operations. Bool contract, shared across all three:
+    //   true  — the signal was delivered.
+    //   false — the signal was not delivered (process already gone, syscall
+    //           failed, or the platform has no mapping for this signal).
+    //
     //   terminate(): SIGTERM / CTRL_BREAK_EVENT
     //   interrupt(): SIGINT  / (always false on Windows)
     //   kill():      SIGKILL / TerminateJobObject (tree kill)

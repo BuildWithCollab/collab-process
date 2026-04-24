@@ -27,16 +27,21 @@ public:
     auto wait() -> std::expected<Result, SpawnError>;
     auto wait_for(std::chrono::milliseconds timeout) -> std::optional<Result>;
 
-    // Send a termination request. Returns true iff the syscall succeeded.
-    // No waiting, no escalation — compose with wait_for()/kill() yourself.
-    // Only works when the child was spawned signalable (any redirected
-    // stream, or signalable(true) explicitly); returns false otherwise.
+    // Bool contract, shared across terminate/interrupt/kill:
+    //   true  — the signal was delivered.
+    //   false — the signal was not delivered (process already gone, syscall
+    //           failed, or the platform has no mapping for this signal).
+    // That is the only meaning of the bool. No other conditions are encoded.
+
+    // Send a termination request. No waiting, no escalation — compose with
+    // wait_for()/kill() yourself. Only works when the child was spawned
+    // signalable (any redirected stream, or signalable(true) explicitly);
+    // returns false otherwise.
     auto terminate() -> bool;
 
-    // Send an interrupt request. Returns true iff the syscall succeeded.
-    // Unix-only: always returns false on Windows, where CTRL_C_EVENT can
-    // only target the whole console and is disabled for processes in a
-    // new process group per MSDN.
+    // Send an interrupt request. Unix-only: always returns false on Windows,
+    // where CTRL_C_EVENT can only target the whole console and is disabled
+    // for processes in a new process group per MSDN.
     auto interrupt() -> bool;
 
     // Immediate tree kill.

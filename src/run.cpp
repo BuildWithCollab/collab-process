@@ -141,6 +141,11 @@ auto spawn(CommandConfig config, IoCallbacks callbacks)
 
 auto spawn_detached(CommandConfig config, IoCallbacks callbacks)
     -> std::expected<int, SpawnError> {
+    // A detached child must not share the parent's process group — otherwise
+    // a terminal Ctrl+C aimed at the dying parent's pgrp lands on the child
+    // the caller explicitly asked to keep running (the opposite of the
+    // fire-and-forget intent). Force signalable regardless of stream modes.
+    config.signalable = true;
     auto proc = spawn(std::move(config), std::move(callbacks));
     if (!proc)
         return std::unexpected(proc.error());
