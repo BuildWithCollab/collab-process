@@ -3,7 +3,9 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -34,11 +36,17 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     // Stdin writer thread — joined before reading pipes or destroying
     std::thread stdin_thread;
 
-    // Background pipe reader — started at spawn time when we own at least
+    // Background pipe readers — started at spawn time when we own at least
     // one read pipe. Fires on_stdout/on_stderr callbacks live and appends
     // to stdout_content / stderr_content as data arrives, so users can
     // observe output from a spawn()ed process without calling wait().
-    std::thread pipe_reader_thread;
+    //
+    // Split per stream (not a single thread that fans out) so detach() can
+    // wake each with CancelSynchronousIo on its native handle — necessary
+    // because CancelIoEx returns ERROR_NOT_FOUND for synchronous ReadFile
+    // on anonymous pipes.
+    std::thread stdout_reader_thread;
+    std::thread stderr_reader_thread;
 
     // Callbacks
     collab::process::move_only_function<void(std::string_view)> on_stdout;
@@ -54,17 +62,19 @@ struct Win32ProcessImpl : RunningProcess::Impl {
             stdin_thread.join();
     }
 
-    void join_pipe_reader() {
-        if (pipe_reader_thread.joinable())
-            pipe_reader_thread.join();
+    void join_pipe_readers() {
+        if (stdout_reader_thread.joinable())
+            stdout_reader_thread.join();
+        if (stderr_reader_thread.joinable())
+            stderr_reader_thread.join();
     }
 
     ~Win32ProcessImpl() override {
         // Ensure I/O threads have finished before closing handles — the
-        // reader's ReadFile must complete (via EOF when the process exits
+        // readers' ReadFile must complete (via EOF when the process exits
         // or cancellation in release_for_detach) before we tear down.
         join_stdin_thread();
-        join_pipe_reader();
+        join_pipe_readers();
         if (stdout_read) CloseHandle(stdout_read);
         if (stderr_read) CloseHandle(stderr_read);
         if (process_handle) CloseHandle(process_handle);
@@ -80,31 +90,16 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         return exit_code == STILL_ACTIVE;
     }
 
-    void read_pipes() {
-        // Read stdout
-        auto read_handle = [](HANDLE h, std::string& out,
-                              collab::process::move_only_function<void(std::string_view)>& cb) {
-            if (!h) return;
-            char buf[4096];
-            DWORD bytes_read;
-            while (ReadFile(h, buf, sizeof(buf), &bytes_read, nullptr) && bytes_read > 0) {
-                std::string_view chunk(buf, bytes_read);
-                if (cb) cb(chunk);
-                out.append(chunk);
-            }
-        };
-
-        // If we have both stdout and stderr pipes, read them concurrently
-        // to avoid deadlock
-        if (stdout_read && stderr_read) {
-            std::thread stderr_thread([&] {
-                read_handle(stderr_read, stderr_content, on_stderr);
-            });
-            read_handle(stdout_read, stdout_content, on_stdout);
-            stderr_thread.join();
-        } else {
-            read_handle(stdout_read, stdout_content, on_stdout);
-            read_handle(stderr_read, stderr_content, on_stderr);
+    static void read_one_pipe(
+        HANDLE h, std::string& out,
+        collab::process::move_only_function<void(std::string_view)>& cb) {
+        if (!h) return;
+        char buf[4096];
+        DWORD bytes_read;
+        while (ReadFile(h, buf, sizeof(buf), &bytes_read, nullptr) && bytes_read > 0) {
+            std::string_view chunk(buf, bytes_read);
+            if (cb) cb(chunk);
+            out.append(chunk);
         }
     }
 
@@ -115,9 +110,9 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         if (!waited) {
             join_stdin_thread();
             WaitForSingleObject(process_handle, INFINITE);
-            // Reader thread (if any) exits once the child closes its
+            // Reader threads (if any) exit once the child closes its
             // write-ends of the pipes, which happens on process exit.
-            join_pipe_reader();
+            join_pipe_readers();
             waited = true;
         }
 
@@ -155,7 +150,7 @@ struct Win32ProcessImpl : RunningProcess::Impl {
 
         // Process exited — reader thread has seen / will imminently see EOF.
         if (!waited) {
-            join_pipe_reader();
+            join_pipe_readers();
             waited = true;
         }
 
@@ -195,7 +190,7 @@ struct Win32ProcessImpl : RunningProcess::Impl {
                 TerminateProcess(process_handle, 1);
             WaitForSingleObject(process_handle, 5000);
 
-            join_pipe_reader();
+            join_pipe_readers();
             waited = true;
 
             auto trim = [](std::string& s) {
@@ -214,7 +209,7 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         }
 
         // Process exited within timeout — pipe reader finishes naturally
-        join_pipe_reader();
+        join_pipe_readers();
         waited = true;
 
         DWORD exit_code = 0;
@@ -270,14 +265,29 @@ struct Win32ProcessImpl : RunningProcess::Impl {
             SetInformationJobObject(job_handle, JobObjectExtendedLimitInformation,
                                     &job_info, sizeof(job_info));
         }
-        // The reader thread would otherwise block on ReadFile until the
-        // detached child closes its pipes — possibly never. Cancel pending
-        // reads so the thread can exit, then join before we return.
-        if (pipe_reader_thread.joinable()) {
-            if (stdout_read) CancelIoEx(stdout_read, nullptr);
-            if (stderr_read) CancelIoEx(stderr_read, nullptr);
-            pipe_reader_thread.join();
-        }
+
+        // Wake the reader threads by closing the pipe read handles.
+        //
+        // Anonymous-pipe synchronous ReadFile cannot be cancelled by either
+        // CancelIoEx (returns ERROR_NOT_FOUND — it only covers async I/O)
+        // or CancelSynchronousIo (also ERROR_NOT_FOUND — the pipe driver
+        // does not register sync reads in the per-thread cancel table).
+        // Closing the handle from this thread is technically UB per MSDN,
+        // but in practice on Windows the in-flight ReadFile returns with
+        // an error and the reader thread exits cleanly — which is exactly
+        // what we need so ~Win32ProcessImpl can join and destroy safely.
+        //
+        // Null out the members before closing so the destructor's
+        // CloseHandle(…) calls don't double-close.
+        HANDLE out_closing = stdout_read;
+        HANDLE err_closing = stderr_read;
+        stdout_read = nullptr;
+        stderr_read = nullptr;
+        if (out_closing) CloseHandle(out_closing);
+        if (err_closing) CloseHandle(err_closing);
+
+        if (stdout_reader_thread.joinable()) stdout_reader_thread.join();
+        if (stderr_reader_thread.joinable()) stderr_reader_thread.join();
     }
 };
 
@@ -405,9 +415,16 @@ auto platform_spawn(SpawnParams params)
                                &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     }
 
-    // Setup STARTUPINFO
-    STARTUPINFOW si = {};
-    si.cb = sizeof(si);
+    // Setup STARTUPINFOEX — we use the extended form so we can scope
+    // inheritance to an explicit handle list below. Without that list,
+    // CreateProcessW(bInheritHandles=TRUE) hands the child every inheritable
+    // handle in *our* address space — including pipes our own parent opened
+    // for us. Those grandparent pipes then keep the grandparent's pipe
+    // readers waiting on EOF until the grandchild exits, which manifests as
+    // wait() blocking on unrelated long-running detached processes.
+    STARTUPINFOEXW siex = {};
+    siex.StartupInfo.cb = sizeof(siex);
+    STARTUPINFOW& si = siex.StartupInfo;
 
     if (!is_interactive) {
         si.dwFlags = STARTF_USESTDHANDLES;
@@ -442,7 +459,7 @@ auto platform_spawn(SpawnParams params)
         : params.working_dir.c_str();
 
     // Creation flags
-    DWORD flags = 0;
+    DWORD flags = EXTENDED_STARTUPINFO_PRESENT;
     // CREATE_NO_WINDOW hides the child's console window — but it also
     // effectively detaches the child's console enough that a parent
     // GenerateConsoleCtrlEvent cannot reach it. Signalable children need
@@ -463,6 +480,62 @@ auto platform_spawn(SpawnParams params)
                                 &job_info, sizeof(job_info));
     }
 
+    // Build the handle-inheritance whitelist.
+    //
+    // For the non-interactive path every handle the child needs is one we
+    // put in STARTUPINFO explicitly — list exactly those. For the
+    // interactive path the child shares our console and we don't set
+    // STARTF_USESTDHANDLES; still need to list our std handles so they
+    // survive the attribute-list filter (an empty list would inherit
+    // nothing and the child would see no stdin/stdout/stderr).
+    std::vector<HANDLE> inherit_handles;
+    auto add_handle = [&](HANDLE h) {
+        if (h && h != INVALID_HANDLE_VALUE)
+            inherit_handles.push_back(h);
+    };
+    if (is_interactive) {
+        add_handle(GetStdHandle(STD_INPUT_HANDLE));
+        add_handle(GetStdHandle(STD_OUTPUT_HANDLE));
+        add_handle(GetStdHandle(STD_ERROR_HANDLE));
+    } else {
+        add_handle(si.hStdInput);
+        add_handle(si.hStdOutput);
+        add_handle(si.hStdError);
+    }
+    // Deduplicate — UpdateProcThreadAttribute rejects duplicates (common
+    // when stderr_merge routes stderr through the stdout pipe or both
+    // streams point at the same NUL handle).
+    std::sort(inherit_handles.begin(), inherit_handles.end());
+    inherit_handles.erase(
+        std::unique(inherit_handles.begin(), inherit_handles.end()),
+        inherit_handles.end());
+
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    auto attr_buf = std::make_unique<BYTE[]>(attr_size);
+    auto attr_list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.get());
+    if (!InitializeProcThreadAttributeList(attr_list, 1, 0, &attr_size)) {
+        int err = static_cast<int>(GetLastError());
+        if (stdin_read) CloseHandle(stdin_read);
+        if (stdout_write) CloseHandle(stdout_write);
+        if (stderr_write) CloseHandle(stderr_write);
+        if (nul_write) CloseHandle(nul_write);
+        if (nul_read) CloseHandle(nul_read);
+        if (stdin_write) CloseHandle(stdin_write);
+        if (stdout_read_h) CloseHandle(stdout_read_h);
+        if (stderr_read_h) CloseHandle(stderr_read_h);
+        if (job) CloseHandle(job);
+        return std::unexpected(SpawnError{SpawnError::platform_error, err});
+    }
+    if (!inherit_handles.empty()) {
+        UpdateProcThreadAttribute(
+            attr_list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherit_handles.data(),
+            inherit_handles.size() * sizeof(HANDLE),
+            nullptr, nullptr);
+    }
+    siex.lpAttributeList = attr_list;
+
     // Spawn
     PROCESS_INFORMATION pi = {};
     BOOL ok = CreateProcessW(
@@ -473,8 +546,10 @@ auto platform_spawn(SpawnParams params)
         flags,
         env_block.data(),
         cwd,
-        &si, &pi
+        &siex.StartupInfo, &pi
     );
+
+    DeleteProcThreadAttributeList(attr_list);
 
     // Cleanup write-side handles and NUL handles (child has them now)
     if (stdin_read) CloseHandle(stdin_read);
@@ -539,11 +614,18 @@ auto platform_spawn(SpawnParams params)
     // start it when the child will actually write to one of our pipes:
     // discard mode creates a pipe too but routes the child's stdout/stderr
     // to NUL, so a reader would block on ReadFile forever.
-    bool needs_reader = (params.stdout_mode == CommandConfig::OutputMode::capture)
-                     || (params.stderr_mode == CommandConfig::OutputMode::capture);
-    if (needs_reader) {
-        Win32ProcessImpl* raw = impl.get();
-        impl->pipe_reader_thread = std::thread([raw] { raw->read_pipes(); });
+    // One thread per captured stream so each can be cancelled individually
+    // via CancelSynchronousIo (see release_for_detach).
+    Win32ProcessImpl* raw = impl.get();
+    if (params.stdout_mode == CommandConfig::OutputMode::capture) {
+        impl->stdout_reader_thread = std::thread([raw] {
+            Win32ProcessImpl::read_one_pipe(raw->stdout_read, raw->stdout_content, raw->on_stdout);
+        });
+    }
+    if (params.stderr_mode == CommandConfig::OutputMode::capture) {
+        impl->stderr_reader_thread = std::thread([raw] {
+            Win32ProcessImpl::read_one_pipe(raw->stderr_read, raw->stderr_content, raw->on_stderr);
+        });
     }
 
     return impl;

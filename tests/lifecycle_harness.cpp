@@ -28,39 +28,8 @@
 #include <string>
 #include <thread>
 
-#ifdef _WIN32
-#define NOMINMAX
-#include <windows.h>
-#endif
-
 using namespace collab::process;
 using namespace std::chrono_literals;
-
-#ifdef _WIN32
-static void diag_sleeper(DWORD pid) {
-    HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, FALSE, pid);
-    if (!h) {
-        std::cerr << "diag: OpenProcess(" << pid << ") failed err="
-                  << GetLastError() << "\n";
-        return;
-    }
-    BOOL in_job = FALSE;
-    if (IsProcessInJob(h, nullptr, &in_job)) {
-        std::cerr << "diag: sleeper pid=" << pid
-                  << " in_any_job=" << (in_job ? "true" : "false") << "\n";
-    } else {
-        std::cerr << "diag: IsProcessInJob failed err="
-                  << GetLastError() << "\n";
-    }
-    // Also check whether the sleeper process looks alive via exit code.
-    DWORD exit_code = 0;
-    if (GetExitCodeProcess(h, &exit_code)) {
-        std::cerr << "diag: sleeper exit_code=" << exit_code
-                  << " (STILL_ACTIVE=" << STILL_ACTIVE << ")\n";
-    }
-    CloseHandle(h);
-}
-#endif
 
 int main(int argc, char* argv[]) {
     if (argc < 4) {
@@ -83,22 +52,12 @@ int main(int argc, char* argv[]) {
     }
 
     if (mode == "spawn_detached") {
-#ifdef _WIN32
-        BOOL harness_in_job = FALSE;
-        IsProcessInJob(GetCurrentProcess(), nullptr, &harness_in_job);
-        std::cerr << "diag: harness in_any_job="
-                  << (harness_in_job ? "true" : "false") << "\n";
-#endif
         auto pid = Command(helper_path).args({"sleep", secs})
             .stdout_discard().stderr_discard().spawn_detached();
         if (!pid) { std::cerr << "spawn_detached failed\n"; return 2; }
         std::cout << *pid << std::endl;
         std::cout.flush();
-#ifdef _WIN32
-        std::this_thread::sleep_for(200ms);
-        diag_sleeper(static_cast<DWORD>(*pid));
-#endif
-        std::this_thread::sleep_for(300ms);
+        std::this_thread::sleep_for(500ms);
         return 0;
     }
 
