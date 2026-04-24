@@ -163,16 +163,22 @@ Two ideas show up across the recipes — worth a minute up front.
 
 A child process can safely receive `SIGINT` / `SIGTERM` from exactly one place — that's the **mode**. Process-group membership is one bit, set at spawn time.
 
-| Mode | Ctrl+C from terminal | `terminate()` / `interrupt()` | `kill()` |
+**Ctrl+C from the terminal:**
+
+- `interactive` (default) — child shares the parent's process group, so terminal `Ctrl+C` reaches both parent and child.
+- `headless` (opt-in) — child is in its own process group, so terminal `Ctrl+C` stays with the parent.
+
+**Code-driven signals:**
+
+| Method | Interactive | Headless (Unix) | Headless (Windows) |
 |---|---|---|---|
-| **`interactive`** (default) | Reaches the child (shared process group) | Throws `ModeError` | Works (single-process on Unix, Job Object tree-kill on Windows) |
-| **`headless`** (opt-in) | Does not reach the child (own process group) | Delivers via `killpg` / `CTRL_BREAK_EVENT` | Works (tree kill in both) |
+| `terminate()` | Throws `ModeError` | Delivers `SIGTERM` via `killpg` | Delivers `CTRL_BREAK_EVENT` |
+| `interrupt()` | Throws `ModeError` | Delivers `SIGINT` via `killpg` | Always returns `false` — `CTRL_C_EVENT` cannot target a process group, and is disabled for processes in a new process group per MSDN |
+| `kill()` | Single-child kill (Unix); Job Object tree-kill (Windows) | `SIGKILL` via `killpg` (tree kill) | Job Object tree-kill |
 
 `kill()` is unconditional in both modes so the destructor can always tear down. `terminate()` and `interrupt()` are deliberately strict — calling them on an interactive handle throws `ModeError` (a `std::logic_error`), because there's no sane meaning to "the terminal owns signals AND I'm about to send one."
 
 `spawn_detached()` always forces `headless` regardless of the caller's config — a detached child must not share the dying parent's process group.
-
-> Note: `interrupt()` on Windows always returns `false` even in headless mode. `CTRL_C_EVENT` cannot target a process group and is disabled for processes in a new process group per MSDN.
 
 ### Lifecycle Guarantees
 
