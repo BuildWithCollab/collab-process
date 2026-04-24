@@ -16,13 +16,14 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
   - [SpawnError](#spawnerror)
   - [RunningProcess](#runningprocess)
   - [Mode](#mode)
+  - [Lifecycle Guarantees](#lifecycle-guarantees)
   - [ProcessRef](#processref)
   - [Command (fluent builder)](#command-fluent-builder)
   - [Dotenv Integration](#dotenv-integration)
   - [Free Functions](#free-functions)
   - [Utilities](#utilities)
 - [Defaults](#defaults)
-- [What Happens Internally](#what-happens-internally)
+- [Platform Notes](#platform-notes)
 - [Building](#building)
 - [Testing](#testing)
 
@@ -378,6 +379,29 @@ swallow it.
 caller's configuration: a detached child must not share the dying parent's
 process group.
 
+### Lifecycle Guarantees
+
+A non-detached child's lifetime is bounded by its parent's lifetime — on
+**every platform**, including when the parent dies abruptly.
+
+| Parent ends by... | Non-detached child | Detached child |
+|---|---|---|
+| Scope exit (`~RunningProcess()`) | Killed (RAII) | (already released) |
+| Normal exit / return from `main` | Killed | Survives |
+| Crash, `SIGKILL`, OOM kill | Killed | Survives |
+
+This parity matters and it's enforced differently on each platform: on
+Windows by the Job Object's kill-on-close flag; on Linux and macOS by an
+internal supervisor process that watches the library's lifetime and
+cleans up the target if the library dies. The mechanism is invisible —
+`pid()`, `wait()`, and the signal methods all act on the target you
+spawned.
+
+Use `detach()` when you explicitly want a child to outlive its parent
+(daemons, fire-and-forget jobs handed to an external tracker, observe-
+then-release patterns). Otherwise, trust that exiting — for any reason —
+cleans up.
+
 ### ProcessRef
 
 Reconnect to a process by PID — e.g. from a database. Honest about its limitations: no process group, no tree kill, no graceful stop.
@@ -514,17 +538,19 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 
 `CommandConfig{}` with just a `program` set behaves like running the command in your terminal. Capture is opt-in.
 
-## What Happens Internally
+## Platform Notes
 
-1. **Load .env files** (if `dotenv == true`) — walk from `working_dir` (or cwd) to root, load all `.env` / `.env.yaml` / `.env.json` files, merge and expand `${VAR}` references. Vars are prepended to `env_add` so explicit entries take precedence. Uses [dotenv](https://github.com/BuildWithCollab/dotenv).
-2. **Resolve the program** — walk PATH, find full path
-3. **On Windows: MZ check** — read 2 bytes. `MZ` → `CreateProcessW` directly. Not `MZ` → wrap with `cmd /c`
-4. **Build env block** — copy parent (or start empty), apply add/remove. Child gets its own block; parent is never touched
-5. **Create pipes** — only for modes that need them
-6. **On Windows, console-inherit path** (all streams inherit, `Mode::interactive`) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
-7. **Spawn** — `CreateProcessW` / `fork`+`execve`. Job object (Windows) or process group (Unix) for tree kill
-8. **Concurrent I/O** — stdin writes in a background thread to prevent deadlock with stdout/stderr reading
-9. **Return** — `run()` waits + returns `Result`. `spawn()` returns `RunningProcess` immediately
+### Windows
+
+- **Non-PE programs are wrapped with `cmd /c`.** `.bat`, `.cmd`, `.ps1`,
+  and any other non-PE targets are handled transparently — you can spawn
+  them by name the same way you'd spawn an `.exe`. The MZ magic check
+  used to decide is exposed as `is_pe_executable` if you need it
+  yourself.
+- **Console VT input is enabled for interactive children.** When all
+  streams inherit and the mode is `Mode::interactive`, the console is
+  reset with `ENABLE_VIRTUAL_TERMINAL_INPUT` so terminal tools that rely
+  on escape sequences (PSReadLine `Ctrl+R`, etc.) behave correctly.
 
 ## Building
 
