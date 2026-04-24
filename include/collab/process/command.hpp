@@ -158,8 +158,13 @@ public:
         return std::forward<decltype(self)>(self);
     }
 
-    auto signalable(this auto&& self, bool value = true) -> decltype(auto) {
-        self.config_.signalable = value;
+    auto interactive(this auto&& self) -> decltype(auto) {
+        self.config_.mode = CommandConfig::Mode::interactive;
+        return std::forward<decltype(self)>(self);
+    }
+
+    auto headless(this auto&& self) -> decltype(auto) {
+        self.config_.mode = CommandConfig::Mode::headless;
         return std::forward<decltype(self)>(self);
     }
 

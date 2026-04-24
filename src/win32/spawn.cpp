@@ -1,6 +1,8 @@
 #include "../platform.hpp"
 #include "../running_process_impl.hpp"
 
+#include "collab/process/mode_error.hpp"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -22,11 +24,12 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     int process_id = 0;
 
     // Set before CreateProcess, tracks whether CREATE_NEW_PROCESS_GROUP was
-    // applied. GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) only has a
-    // valid target when pid names a process-group leader, and Windows does
-    // *not* reliably return zero for non-leaders — the call can succeed
-    // while delivering the signal nowhere. Gate on this to get honest
-    // return values.
+    // applied (i.e. the child was spawned headless).
+    // GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) only has a valid
+    // target when pid names a process-group leader, and Windows does *not*
+    // reliably return zero for non-leaders — the call can succeed while
+    // delivering the signal nowhere. terminate()/interrupt() throw
+    // ModeError when this is false rather than lying about delivery.
     bool has_own_group = false;
 
     // Pipes for captured output
@@ -231,20 +234,28 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     }
 
     auto terminate() -> bool override {
-        if (!is_alive()) return false;
         // CTRL_BREAK_EVENT's second parameter is a process-group ID. A pid
-        // only names a group when that process was spawned with
-        // CREATE_NEW_PROCESS_GROUP (i.e. signalable). Without that we have
-        // nothing meaningful to target — short-circuit to false.
-        if (!has_own_group) return false;
+        // only names a group when the process was spawned headless
+        // (CREATE_NEW_PROCESS_GROUP). Interactive children share the
+        // parent's console group — the terminal owns their signals, not
+        // us. Calling terminate() on such a handle is a contract violation;
+        // throw rather than silently returning false.
+        if (!has_own_group)
+            throw ModeError("collab::process: terminate() requires headless mode");
+        if (!is_alive()) return false;
         return GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
                                         static_cast<DWORD>(process_id)) != 0;
     }
 
     auto interrupt() -> bool override {
-        // No viable mapping on Windows — CTRL_C_EVENT broadcasts to the
-        // whole console (would hit the parent too) and is disabled for
-        // processes in a new process group per MSDN.
+        // Same mode contract as terminate(): interrupting an interactive
+        // child is a programming error (terminal owns its signals).
+        if (!has_own_group)
+            throw ModeError("collab::process: interrupt() requires headless mode");
+        // Even in headless mode, Windows offers no viable mapping —
+        // CTRL_C_EVENT broadcasts to the whole console (would hit the
+        // parent too) and is disabled for processes in a new process group
+        // per MSDN. Honest "not delivered" return.
         return false;
     }
 
@@ -344,16 +355,17 @@ auto platform_spawn(SpawnParams params)
     auto impl = std::make_unique<Win32ProcessImpl>();
     impl->on_stdout = std::move(params.on_stdout);
     impl->on_stderr = std::move(params.on_stderr);
-    impl->has_own_group = params.signalable;
+    impl->has_own_group = params.headless;
 
-    // Interactive: all streams inherit AND child is not signalable — the
-    // child shares the parent's console and process group, so Ctrl+C routes
-    // naturally. Signalable children get CREATE_NEW_PROCESS_GROUP, which
-    // breaks interactive console setup (foreground group tracking etc.).
+    // Console-inherit path: all streams inherit AND the child is interactive
+    // (not headless) — the child shares the parent's console and process
+    // group, so Ctrl+C routes naturally. Headless children get
+    // CREATE_NEW_PROCESS_GROUP, which breaks shared-console setup
+    // (foreground group tracking etc.).
     bool is_interactive = (params.stdout_mode == CommandConfig::OutputMode::inherit)
         && (params.stderr_mode == CommandConfig::OutputMode::inherit)
         && (params.stdin_mode == CommandConfig::StdinMode::inherit)
-        && !params.signalable;
+        && !params.headless;
 
     if (is_interactive)
         reset_console_for_interactive();
@@ -462,12 +474,12 @@ auto platform_spawn(SpawnParams params)
     DWORD flags = EXTENDED_STARTUPINFO_PRESENT;
     // CREATE_NO_WINDOW hides the child's console window — but it also
     // effectively detaches the child's console enough that a parent
-    // GenerateConsoleCtrlEvent cannot reach it. Signalable children need
+    // GenerateConsoleCtrlEvent cannot reach it. Headless children need
     // that console reachability to receive CTRL_BREAK later, so keep the
     // shared console in that case.
-    if (!is_interactive && !params.signalable)
+    if (!is_interactive && !params.headless)
         flags |= CREATE_NO_WINDOW;
-    if (params.signalable)
+    if (params.headless)
         flags |= CREATE_NEW_PROCESS_GROUP;
     flags |= CREATE_UNICODE_ENVIRONMENT;
 

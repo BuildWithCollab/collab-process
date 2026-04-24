@@ -15,7 +15,7 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
   - [Result](#result)
   - [SpawnError](#spawnerror)
   - [RunningProcess](#runningprocess)
-  - [Signal reachability](#signal-reachability)
+  - [Mode](#mode)
   - [ProcessRef](#processref)
   - [Command (fluent builder)](#command-fluent-builder)
   - [Dotenv Integration](#dotenv-integration)
@@ -180,9 +180,12 @@ struct CommandConfig {
     // Behavior
     std::chrono::milliseconds timeout{0}; // 0 = no timeout
 
-    // Signal reachability. nullopt = infer from stream modes (any stream
-    // redirected → true, all inherit → false). Set to override the inference.
-    std::optional<bool> signalable;
+    // Signal ownership. interactive (default): child shares parent's
+    // process group, terminal drives Ctrl+C. headless: child is in its
+    // own process group, code drives terminate()/interrupt(). See the
+    // Mode section below.
+    enum class Mode { interactive, headless };
+    Mode mode = Mode::interactive;
 
     bool dotenv = false;                  // load .env files into child env
 };
@@ -293,9 +296,13 @@ class RunningProcess {
     //   false — the signal was not delivered (process already gone, syscall
     //           failed, or the platform has no mapping for this signal).
     //
-    //   terminate(): SIGTERM / CTRL_BREAK_EVENT
-    //   interrupt(): SIGINT  / (always false on Windows)
-    //   kill():      SIGKILL / TerminateJobObject (tree kill)
+    // Mode contract (terminate/interrupt only): require headless mode.
+    // Calling them on an interactive handle throws ModeError. kill() is
+    // unconditional so RAII teardown works in both modes.
+    //
+    //   terminate(): SIGTERM / CTRL_BREAK_EVENT   — requires headless
+    //   interrupt(): SIGINT  / (Windows: always false) — requires headless
+    //   kill():      SIGKILL / TerminateJobObject (tree kill) — any mode
     auto terminate() -> bool;
     auto interrupt() -> bool;
     auto kill() -> bool;
@@ -310,18 +317,20 @@ Graceful shutdown is composition, not a single call — the three primitives
 give you the parts:
 
 ```cpp
-auto proc = spawn(config);
+auto proc = Command("server").headless().spawn();
 if (!proc) return;
 
-proc->terminate();                     // ask nicely
+proc->terminate();                     // ask nicely (headless required)
 if (!proc->wait_for(5s).has_value())   // didn't exit in time
-    proc->kill();                      // escalate
+    proc->kill();                      // escalate (any mode)
 ```
 
-`terminate()` and `interrupt()` only deliver when the child was spawned
-signalable (see [Signal reachability](#signal-reachability) below); otherwise
-they return `false`. `interrupt()` is Unix-only; it always returns `false`
-on Windows.
+`terminate()` and `interrupt()` require headless mode — calling them on an
+interactive handle throws `ModeError` (see [Mode](#mode) below). `kill()`
+works unconditionally so the RAII destructor can tear down interactive
+children too. `interrupt()` on Windows always returns `false` even in
+headless mode: `CTRL_C_EVENT` cannot target a process group and is
+disabled for processes in a new process group per MSDN.
 
 ```cpp
 // Detach if the child should outlive this handle
@@ -329,24 +338,45 @@ int pid = std::move(*proc).detach();
 save_to_db(pid);  // reconnect later with ProcessRef
 ```
 
-### Signal reachability
+### Mode
 
-Whether `terminate()` / `interrupt()` can reach the child, and whether the
-user's Ctrl+C does, depends on how the child was spawned. The library
-infers this from the stream modes you already configured — redirecting any
-stream is taken as a sign you're driving the child from code and want to
-drive its signals from code too.
+A child can safely receive `SIGINT` / `SIGTERM` from exactly one place —
+that place is the mode. Process-group membership is one bit, and the
+library sets it exactly once from `CommandConfig::mode` (or
+`Command::interactive()` / `Command::headless()`). Stream modes no longer
+influence this.
 
-| Configuration | Ctrl+C from user | `terminate()` / `interrupt()` | `kill()` |
+| Mode | Ctrl+C from user | `terminate()` / `interrupt()` | `kill()` |
 |---|---|---|---|
-| Any stream redirected (inferred **signalable**) | does not reach child | deliver from code | cascades to descendants |
-| All streams inherit (inferred **not signalable**) | reaches child naturally | return `false` | direct child only on Unix; Windows still tree-kills via Job Object |
+| **`Mode::interactive`** (default) | reaches child naturally (shared pgrp) | throws `ModeError` | tree-kill on Windows (Job Object); direct child on Unix |
+| **`Mode::headless`** (opt-in) | does not reach child (own pgrp) | deliver from code | cascades to descendants |
 
-Override the inference with `.signalable(true)` or `.signalable(false)` (or
-set `CommandConfig::signalable` directly) when you need the opposite —
-e.g. spawning an all-inherit child that you still want to send
-`terminate()` to, or capturing stdout from a child that should still
-receive the user's Ctrl+C.
+```cpp
+// Interactive (default) — hand control to the terminal. Ctrl+C takes
+// parent and child together. kill() still works for RAII teardown.
+auto result = Command("git")
+    .args({"status", "--porcelain"})
+    .stdout_capture()
+    .run();
+
+// Headless — code owns lifecycle. Ctrl+C stays with the parent.
+auto proc = Command("server")
+    .stdout_capture()
+    .headless()
+    .spawn();
+proc->terminate();
+if (!proc->wait_for(5s).has_value())
+    proc->kill();
+```
+
+`ModeError` is a `std::logic_error`, exposed from `<collab/process.hpp>`.
+Calling `terminate()` / `interrupt()` on an interactive handle is a
+programming error, not a transient runtime failure — the library does not
+swallow it.
+
+`spawn_detached()` always forces `Mode::headless` regardless of the
+caller's configuration: a detached child must not share the dying parent's
+process group.
 
 ### ProcessRef
 
@@ -399,7 +429,8 @@ auto result = std::move(cmd).run();
 | **Stdin** | `stdin_string(content)`, `stdin_file(path)`, `stdin_close()`, `stdin_inherit()` |
 | **Stdout** | `stdout_capture()`, `stdout_inherit()`, `stdout_discard()`, `stdout_callback(fn)` |
 | **Stderr** | `stderr_capture()`, `stderr_inherit()`, `stderr_discard()`, `stderr_merge()`, `stderr_callback(fn)` |
-| **Behavior** | `timeout(ms)`, `signalable(bool)`, `dotenv()` |
+| **Mode** | `interactive()`, `headless()` |
+| **Behavior** | `timeout(ms)`, `dotenv()` |
 | **Execute** | `run()` → `expected<Result>`, `spawn()` → `expected<RunningProcess>`, `spawn_detached()` → `expected<int>` |
 
 ### Dotenv Integration
@@ -478,7 +509,7 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 | stderr | inherit | Child errors to terminal |
 | env | copy parent | Apply additions/removals on top |
 | timeout | none | No timeout unless set |
-| signalable | inferred | Any stream redirected → true; all inherit → false |
+| mode | `Mode::interactive` | Terminal drives signals; opt into `headless` when code does |
 | dotenv | false | No .env file loading |
 
 `CommandConfig{}` with just a `program` set behaves like running the command in your terminal. Capture is opt-in.
@@ -490,7 +521,7 @@ auto write_temp_file(std::string_view content, std::string_view prefix = "proc")
 3. **On Windows: MZ check** — read 2 bytes. `MZ` → `CreateProcessW` directly. Not `MZ` → wrap with `cmd /c`
 4. **Build env block** — copy parent (or start empty), apply add/remove. Child gets its own block; parent is never touched
 5. **Create pipes** — only for modes that need them
-6. **On Windows, interactive mode** (all streams inherit, child not signalable) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
+6. **On Windows, console-inherit path** (all streams inherit, `Mode::interactive`) — reset console with `ENABLE_VIRTUAL_TERMINAL_INPUT` for escape sequences (Ctrl+R, PSReadLine)
 7. **Spawn** — `CreateProcessW` / `fork`+`execve`. Job object (Windows) or process group (Unix) for tree kill
 8. **Concurrent I/O** — stdin writes in a background thread to prevent deadlock with stdout/stderr reading
 9. **Return** — `run()` waits + returns `Result`. `spawn()` returns `RunningProcess` immediately

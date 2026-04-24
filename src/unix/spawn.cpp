@@ -1,6 +1,8 @@
 #include "../platform.hpp"
 #include "../running_process_impl.hpp"
 
+#include "collab/process/mode_error.hpp"
+
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -47,11 +49,11 @@ namespace collab::process::detail {
 // and _exits → supervisor reads the errno.
 //
 // pgrp ordering matters. Supervisor forks grandchild while still in the
-// library's pgrp, so grandchild inherits it (preserving "all-inherit children
-// share the parent's pgrp"). Grandchild then does its own setpgid(0, 0) when
-// signalable. *After* the grandchild exists, the supervisor moves itself to
-// its own pgrp so an external kill against the library's pgrp doesn't take
-// the supervisor with it.
+// library's pgrp, so grandchild inherits it (preserving "interactive
+// children share the parent's pgrp"). Grandchild then does its own
+// setpgid(0, 0) when headless. *After* the grandchild exists, the
+// supervisor moves itself to its own pgrp so an external kill against the
+// library's pgrp doesn't take the supervisor with it.
 
 // POSIX guarantees writes ≤ PIPE_BUF are atomic; all our messages are
 // well under that. We write the whole message in a single ::write() call.
@@ -488,16 +490,19 @@ struct UnixProcessImpl : RunningProcess::Impl {
     }
 
     auto terminate() -> bool override {
-        // Non-signalable children share the terminal's signal path already —
-        // Ctrl+C is the user-facing tool; terminate() is a no-op so the
-        // public contract matches Windows' CREATE_NEW_PROCESS_GROUP rule.
-        if (!has_own_group) return false;
+        // Interactive children share the parent's process group — the
+        // terminal owns their signals, not us. Calling terminate() on such
+        // a handle is a contract violation (not a transient failure), so we
+        // throw rather than silently returning false.
+        if (!has_own_group)
+            throw ModeError("collab::process: terminate() requires headless mode");
         if (!is_alive()) return false;
         return ::kill(-target_pid, SIGTERM) == 0;
     }
 
     auto interrupt() -> bool override {
-        if (!has_own_group) return false;
+        if (!has_own_group)
+            throw ModeError("collab::process: interrupt() requires headless mode");
         if (!is_alive()) return false;
         return ::kill(-target_pid, SIGINT) == 0;
     }
@@ -557,7 +562,7 @@ auto platform_spawn(SpawnParams params)
     auto impl = std::make_unique<UnixProcessImpl>();
     impl->on_stdout = std::move(params.on_stdout);
     impl->on_stderr = std::move(params.on_stderr);
-    impl->has_own_group = params.signalable;
+    impl->has_own_group = params.headless;
 
     // ── Library-owned pipes. All O_CLOEXEC so the grandchild never inherits
     //    them — dup2 onto stdin/stdout/stderr clears the flag on the dup
@@ -679,9 +684,9 @@ auto platform_spawn(SpawnParams params)
                 [[maybe_unused]] int _ = ::chdir(params.working_dir.c_str());
             }
 
-            // Own pgrp only when signalable. Must happen before execve so
+            // Own pgrp only when headless. Must happen before execve so
             // the inheritance is visible to the target.
-            if (params.signalable)
+            if (params.headless)
                 ::setpgid(0, 0);
 
             std::vector<const char*> argv;
@@ -725,7 +730,7 @@ auto platform_spawn(SpawnParams params)
                         lifecycle_pipe[0],
                         release_pipe[0],
                         exec_probe[0],
-                        params.signalable);
+                        params.headless);
         // supervisor_main is [[noreturn]]; unreachable.
     }
 

@@ -35,10 +35,11 @@ struct SpawnParams {
 
     // Behavior
     //
-    // signalable: resolved from CommandConfig by the shared layer (explicit
-    // override if set, otherwise any-redirect inference). Drives isolation
-    // of the child into its own process group for code-driven signalling.
-    bool signalable = false;
+    // headless: resolved from CommandConfig::mode by the shared layer. Drives
+    // isolation of the child into its own process group for code-driven
+    // signalling. When false, the child shares the parent's process group and
+    // terminate()/interrupt() throw ModeError.
+    bool headless = false;
     bool needs_cmd_wrapper = false;  // Windows: resolved target is not a PE
 
     // Callbacks (moved in, not copied)

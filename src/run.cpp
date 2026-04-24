@@ -8,16 +8,11 @@
 
 namespace collab::process {
 
-// If any stream is redirected, the child is already detached enough from
-// the user's terminal that we should drive its signals from code. If every
-// stream inherits, the child is wired to the terminal and Ctrl+C should
-// reach it naturally — code-driven signalling is off. An explicit override
-// on the config wins over the inference.
-static bool resolve_signalable(const CommandConfig& config) {
-    if (config.signalable.has_value()) return *config.signalable;
-    return config.stdout_mode != CommandConfig::OutputMode::inherit
-        || config.stderr_mode != CommandConfig::OutputMode::inherit
-        || config.stdin_mode  != CommandConfig::StdinMode::inherit;
+// Headless → child gets its own process group (code drives SIGINT/SIGTERM).
+// Interactive → child shares parent's pgrp (terminal drives signals).
+// Direct read of config.mode — no inference from stream modes.
+static bool resolve_headless(const CommandConfig& config) {
+    return config.mode == CommandConfig::Mode::headless;
 }
 
 // When dotenv is enabled, load .env files and prepend vars to env_add.
@@ -74,7 +69,7 @@ auto run(CommandConfig config, IoCallbacks callbacks)
         .stdin_mode = config.stdin_mode,
         .stdin_content = std::move(config.stdin_content),
         .stdin_path = std::move(config.stdin_path),
-        .signalable = resolve_signalable(config),
+        .headless = resolve_headless(config),
         .needs_cmd_wrapper = needs_cmd_wrapper,
         .on_stdout = std::move(callbacks.on_stdout),
         .on_stderr = std::move(callbacks.on_stderr),
@@ -126,7 +121,7 @@ auto spawn(CommandConfig config, IoCallbacks callbacks)
         .stdin_mode = config.stdin_mode,
         .stdin_content = std::move(config.stdin_content),
         .stdin_path = std::move(config.stdin_path),
-        .signalable = resolve_signalable(config),
+        .headless = resolve_headless(config),
         .needs_cmd_wrapper = needs_cmd_wrapper,
         .on_stdout = std::move(callbacks.on_stdout),
         .on_stderr = std::move(callbacks.on_stderr),
@@ -144,8 +139,8 @@ auto spawn_detached(CommandConfig config, IoCallbacks callbacks)
     // A detached child must not share the parent's process group — otherwise
     // a terminal Ctrl+C aimed at the dying parent's pgrp lands on the child
     // the caller explicitly asked to keep running (the opposite of the
-    // fire-and-forget intent). Force signalable regardless of stream modes.
-    config.signalable = true;
+    // fire-and-forget intent). Force headless regardless of caller's mode.
+    config.mode = CommandConfig::Mode::headless;
     auto proc = spawn(std::move(config), std::move(callbacks));
     if (!proc)
         return std::unexpected(proc.error());

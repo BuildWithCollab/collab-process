@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <filesystem>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -40,11 +39,19 @@ struct CommandConfig {
     // Behavior
     std::chrono::milliseconds timeout{0};  // 0 = no timeout
 
-    // Signal reachability. nullopt = infer from stream modes: if any stream
-    // is redirected the child gets isolated for code-driven signalling; if
-    // all streams inherit it shares the terminal's signal path so the
-    // user's Ctrl+C reaches it naturally. Set explicitly to override.
-    std::optional<bool> signalable;
+    // Signal ownership. The child can safely receive SIGINT / SIGTERM from
+    // exactly one place:
+    //   interactive — terminal drives signals. Child shares the parent's
+    //                 process group. Ctrl+C reaches parent and child
+    //                 together. Code-driven terminate()/interrupt() throw
+    //                 ModeError; kill() still works so RAII teardown is
+    //                 unconditional.
+    //   headless    — code drives signals. Child is in its own process
+    //                 group. Terminal Ctrl+C does not reach it.
+    //                 terminate()/interrupt() deliver via killpg (Unix) or
+    //                 CTRL_BREAK_EVENT (Windows).
+    enum class Mode { interactive, headless };
+    Mode mode = Mode::interactive;
 
     // Dotenv — load .env files into the child's environment
     bool dotenv = false;                   // false = no .env loading

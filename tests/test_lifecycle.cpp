@@ -257,6 +257,9 @@ TEST_CASE("lifecycle: graceful parent exit tears down non-detached child",
 
 TEST_CASE("lifecycle: kill() returns false on already-exited process",
           "[lifecycle][bool]") {
+    // kill() is unconditional — works in both interactive and headless.
+    // Tested with default (interactive) mode because RAII teardown relies
+    // on kill() working there.
     auto proc = Command(helper_path())
         .args({"exit", "0"})
         .stdout_discard()
@@ -264,12 +267,27 @@ TEST_CASE("lifecycle: kill() returns false on already-exited process",
         .spawn();
     REQUIRE(proc.has_value());
 
-    // Wait for natural exit — process is definitively gone.
     auto result = proc->wait();
     REQUIRE(result.has_value());
 
-    // Signal methods must return false: target is gone, signals can't land.
     CHECK_FALSE(proc->kill());
+}
+
+TEST_CASE("lifecycle: terminate()/interrupt() return false on already-exited headless process",
+          "[lifecycle][bool]") {
+    // terminate()/interrupt() require headless mode (they throw ModeError
+    // in interactive). Bool contract then applies: target gone → false.
+    auto proc = Command(helper_path())
+        .args({"exit", "0"})
+        .headless()
+        .stdout_discard()
+        .stderr_discard()
+        .spawn();
+    REQUIRE(proc.has_value());
+
+    auto result = proc->wait();
+    REQUIRE(result.has_value());
+
     CHECK_FALSE(proc->terminate());
     CHECK_FALSE(proc->interrupt());
 }
@@ -279,10 +297,10 @@ TEST_CASE("lifecycle: kill() returns false on already-exited process",
 #ifndef _WIN32
 TEST_CASE("lifecycle: Unix spawn_detached child is in its own process group",
           "[lifecycle][unix][spawn_detached]") {
-    // Default (all-inherit) config. The fix in spawn_detached() forces
-    // signalable=true so the child always gets its own pgrp regardless of
-    // stream modes — prevents terminal Ctrl+C aimed at the dying parent's
-    // pgrp from landing on the detached child.
+    // Default (all-inherit) config. spawn_detached() forces
+    // Mode::headless so the child always gets its own pgrp regardless of
+    // the caller's mode — prevents terminal Ctrl+C aimed at the dying
+    // parent's pgrp from landing on the detached child.
     CommandConfig config;
     config.program = helper_path();
     config.args = {"sleep", "5"};
