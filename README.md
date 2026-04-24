@@ -1,4 +1,4 @@
-# collab-process 🔀
+# 🏃‍♀️ `collab::process`
 
 A C++23 process library. Spawn processes, capture output, manage lifecycles.
 
