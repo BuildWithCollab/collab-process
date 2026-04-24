@@ -525,7 +525,7 @@ struct UnixProcessImpl : RunningProcess::Impl {
         // target before the supervisor sees the release byte.
         if (release_fd >= 0) {
             unsigned char byte = 1;
-            (void)::write(release_fd, &byte, 1);
+            [[maybe_unused]] ssize_t _ = ::write(release_fd, &byte, 1);
             ::close(release_fd);
             release_fd = -1;
         }
@@ -675,8 +675,9 @@ auto platform_spawn(SpawnParams params)
                 program_path = abs.string();
             }
 
-            if (!params.working_dir.empty())
-                (void)::chdir(params.working_dir.c_str());
+            if (!params.working_dir.empty()) {
+                [[maybe_unused]] int _ = ::chdir(params.working_dir.c_str());
+            }
 
             // Own pgrp only when signalable. Must happen before execve so
             // the inheritance is visible to the target.
@@ -789,7 +790,7 @@ auto platform_spawn(SpawnParams params)
     // Stdin writer thread — same as before.
     if (stdin_pipe[1] >= 0 && params.stdin_mode == CommandConfig::StdinMode::content) {
         std::thread([content = std::move(params.stdin_content), fd = stdin_pipe[1]] {
-            (void)::write(fd, content.data(), content.size());
+            [[maybe_unused]] ssize_t _ = ::write(fd, content.data(), content.size());
             ::close(fd);
         }).detach();
     } else if (stdin_pipe[1] >= 0 && params.stdin_mode == CommandConfig::StdinMode::file) {
@@ -798,8 +799,9 @@ auto platform_spawn(SpawnParams params)
             if (file >= 0) {
                 char buf[4096];
                 ssize_t n;
-                while ((n = ::read(file, buf, sizeof(buf))) > 0)
-                    (void)::write(fd, buf, n);
+                while ((n = ::read(file, buf, sizeof(buf))) > 0) {
+                    [[maybe_unused]] ssize_t _ = ::write(fd, buf, n);
+                }
                 ::close(file);
             }
             ::close(fd);
