@@ -53,6 +53,17 @@ stdin/stdout/stderr and nothing else. No post-fork FD-table walk, no
 without it, the target can inherit the lifecycle pipe's write end and
 the supervisor will never see EOF on library death.
 
+**Supervisor process group.** The supervisor calls `setpgid(0, 0)`
+*after* the second fork, not before. Ordering matters: the grandchild
+is forked while the supervisor still shares the library's pgrp, so the
+grandchild inherits the library's pgrp (preserving the "interactive
+mode shares the parent's pgrp" contract). The grandchild then does its
+own `setpgid(0, 0)` when `has_own_group` is set, exactly as today. Only
+after the grandchild is forked does the supervisor move to its own
+pgrp, isolating itself from pgrp-scoped signals aimed at the library
+or target — an external tree-kill of the library's pgrp does not take
+the supervisor with it.
+
 **Detecting `execve` failure.** `execve` happens in the grandchild,
 after the supervisor has already returned from its second `fork`. The
 grandchild creates a CLOEXEC exec-probe pipe (`pipe2(fd, O_CLOEXEC)`)
@@ -63,34 +74,52 @@ before `execve`:
 - Failed `execve` → grandchild writes `errno` to the probe, `_exit`s →
   supervisor reads the errno → execve failed.
 
-**Info pipe wire format.** After the supervisor learns the outcome
-(either its own `fork` errno or the grandchild's reported `execve`
-errno), it writes one framed message to the info pipe and closes it:
+**Info pipe wire format.** The info pipe carries two framed messages
+over the supervisor's lifetime, written by the supervisor and read by
+the library.
 
-- tag byte `0` (ok) — followed by `pid_t` target PID
-- tag byte `1` (error) — followed by `int` errno
+*Message 1 — spawn result.* Written after the supervisor learns whether
+the second fork and grandchild `execve` succeeded:
 
-POSIX guarantees writes ≤ `PIPE_BUF` are atomic, so the single `write()`
-of this message is all-or-nothing. The library reads it synchronously
-before returning from `spawn()`. On error it returns
-`std::unexpected(SpawnError{...})`; callers cannot distinguish
-fork-failure from execve-failure, which matches today's `run()`/`spawn()`
-semantics. On success it stores the target PID in `RunningProcess`.
+- tag `0` (ok) — followed by `pid_t` target PID
+- tag `1` (spawn error) — followed by `int` errno (from `fork` or from
+  the grandchild's exec-probe report)
+
+*Message 2 — target exit.* Written when the target exits (poll event 3):
+
+- tag `2` (exit) — followed by `int` flag (0 = normal exit, 1 = killed
+  by signal) and `int` payload (exit code or signal number, per the
+  flag)
+
+POSIX guarantees writes ≤ `PIPE_BUF` are atomic, so each message lands
+all-or-nothing. The library reads message 1 synchronously before
+returning from `spawn()`; message 2 during `wait()` / `wait_for()` /
+destructor. On spawn error it returns `std::unexpected(SpawnError{...})`;
+callers cannot distinguish fork-failure from execve-failure, which
+matches today's `run()`/`spawn()` semantics. On success it stores the
+target PID in `RunningProcess`.
 
 The supervisor then enters a `poll()` loop watching three events:
 
 1. **Lifecycle pipe EOF** — library process died (any cause, including
-   `SIGKILL`). Supervisor sends `SIGKILL` to the target, `waitpid`s it,
-   `_exit`s. No orphan.
+   `SIGKILL`). Supervisor sends `SIGKILL`: `kill(-target_pid, SIGKILL)`
+   when the target has its own pgrp (tree-kills descendants), otherwise
+   `kill(target_pid, SIGKILL)` (single-target). Supervisor `waitpid`s
+   the target, `_exit(0)`. No orphan.
 2. **Release pipe readable** — library called `release_for_detach()`.
    Supervisor stops watching, `_exit(0)` without touching the target.
    Target reparents to PID 1 and continues running. This is the `detach()`
    semantic working correctly.
-3. **Target exits on its own** — supervisor `waitpid`s it. If the target
-   died from a signal, supervisor `raise`s the same signal on itself. If
-   the target exited normally, supervisor `_exit(code)`s with the same
-   code. The library's existing `WIFSIGNALED` → `128 + sig` and
-   `WIFEXITED` unpacking works unchanged.
+3. **Target exits on its own** — supervisor `waitpid`s the target,
+   writes a result message to the info pipe containing the full target
+   status (`WIFEXITED` vs `WIFSIGNALED`, plus exit code or signal
+   number), closes the pipe, and `_exit(0)`. The library's `waitpid` on
+   the supervisor then resolves unambiguously:
+   - `WIFEXITED(0)` — supervisor exited clean. Read target status from
+     the info pipe and build `Result` with full fidelity.
+   - `WIFSIGNALED` or `WIFEXITED(nonzero)` — supervisor died abnormally
+     or violated protocol. Return `SpawnError{Kind::platform_error}`;
+     target's fate is unknown to the library.
 
 If `poll()` reports release-readable and lifecycle-EOF in the same
 epoch (library wrote to the release pipe then died before the supervisor
@@ -147,8 +176,10 @@ Zero. Implementation detail.
   The supervisor tracks the target PID and the library reads it from the
   supervisor over a small info pipe at spawn time, before returning.
 - `wait()` / `wait_for()` `waitpid` the supervisor (which we are the
-  direct parent of). Supervisor's `_exit` status encodes the target's
-  status, which the library unpacks.
+  direct parent of). The supervisor's own wait status flags health:
+  `WIFEXITED(0)` means the target's true status is on the info pipe
+  (full fidelity); anything else means the supervisor died abnormally
+  and the library returns `SpawnError{platform_error}`.
 - `terminate()` / `interrupt()` / `kill()` signal the target PID
   directly. The supervisor is never signalled by the library; it exits on
   its own when the target does or when the release pipe fires.
