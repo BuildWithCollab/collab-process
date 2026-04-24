@@ -71,10 +71,18 @@ struct [[gnu::packed]] InfoMsgExit {
     int payload;        // exit code or signal number
 };
 
-// pipe2 with O_CLOEXEC is available on Linux since glibc 2.9 and on macOS
-// since 10.10. Wrap for a single call site.
+// pipe2 with O_CLOEXEC is available on Linux since glibc 2.9 but is not
+// available on macOS (despite being in some headers, it's missing from older
+// SDKs and not reliably present). Use pipe() + fcntl() for portability.
 static auto make_cloexec_pipe(int fds[2]) -> bool {
-    return ::pipe2(fds, O_CLOEXEC) == 0;
+    if (::pipe(fds) != 0) return false;
+    if (::fcntl(fds[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        ::fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
+        ::close(fds[0]);
+        ::close(fds[1]);
+        return false;
+    }
+    return true;
 }
 
 // Write the whole buffer or give up — used for the info pipe where a short
@@ -197,15 +205,23 @@ static auto read_all(int fd, void* buf, size_t n) -> bool {
         // (library wrote the release byte, then died). User intent was
         // detach, not tear-down.
         //
-        // Require POLLIN on the release pipe — a byte actually landed.
-        // POLLHUP alone means the library closed the release pipe without
-        // writing (abrupt death: kernel closed all fds on process exit).
-        // In that case fds[0] will also report POLLHUP and we want the
-        // lifecycle branch below to fire so the target gets killed.
+        // macOS (and some BSDs) set POLLIN|POLLHUP when a pipe's write
+        // end closes *without* writing — a subsequent read returns 0
+        // (EOF). Checking POLLIN alone is not enough to distinguish
+        // "library wrote a release byte" from "library died and the
+        // kernel closed all its fds". We must actually read and confirm
+        // a byte landed.
         if (fds[1].revents & POLLIN) {
-            // detach() — let the target go.
-            (void)::close(info_write);
-            _exit(0);
+            unsigned char byte = 0;
+            ssize_t r = ::read(release_read, &byte, 1);
+            if (r == 1) {
+                // detach() — let the target go.
+                (void)::close(info_write);
+                _exit(0);
+            }
+            // r == 0 (EOF) or r < 0: write end closed without writing.
+            // Fall through to the lifecycle check below — the library
+            // died, not detached.
         }
 
         if (fds[0].revents & (POLLIN | POLLHUP)) {
