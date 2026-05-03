@@ -30,7 +30,8 @@ target("collab-process-tests")
         "test_spawn_errors.cpp",
         "test_dotenv.cpp",
         "test_signals.cpp",
-        "test_lifecycle.cpp"
+        "test_lifecycle.cpp",
+        "test_stdin_pipe.cpp"
     )
 
     -- Pass the build output dir so tests can find test_helper

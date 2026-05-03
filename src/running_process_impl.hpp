@@ -7,6 +7,7 @@
 #include <expected>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace collab::process {
 
@@ -24,6 +25,8 @@ struct RunningProcess::Impl {
     virtual auto terminate() -> bool = 0;
     virtual auto interrupt() -> bool = 0;
     virtual auto kill() -> bool = 0;
+    virtual auto write_stdin(std::string_view bytes) -> std::expected<void, WriteError> = 0;
+    virtual void close_stdin() = 0;
     virtual void release_for_detach() {}  // platform-specific cleanup before detach
 };
 

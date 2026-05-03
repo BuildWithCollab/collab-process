@@ -9,7 +9,9 @@
 #include <csignal>
 #include <cstring>
 #include <fcntl.h>
+#include <mutex>
 #include <poll.h>
+#include <pthread.h>
 #include <string>
 #include <sys/wait.h>
 #include <thread>
@@ -262,6 +264,17 @@ struct UnixProcessImpl : RunningProcess::Impl {
     int stdout_fd = -1;
     int stderr_fd = -1;
 
+    // Library-side write end of the child's stdin, retained for the
+    // lifetime of the handle when StdinMode::pipe was selected. Guarded by
+    // stdin_mutex so write_stdin / close_stdin from multiple threads (or
+    // from inside an on_stdout callback racing with the main thread)
+    // serialize cleanly. stdin_piped distinguishes "this handle never had
+    // a writable stdin" from "it had one and we closed it".
+    int stdin_fd = -1;
+    bool stdin_piped = false;
+    bool stdin_closed = false;
+    std::mutex stdin_mutex;
+
     // Library-side fds of the three protocol pipes. All CLOEXEC.
     int info_fd = -1;       // read end of info pipe
     int lifecycle_fd = -1;  // write end of lifecycle pipe (held open for life)
@@ -323,6 +336,7 @@ struct UnixProcessImpl : RunningProcess::Impl {
         join_pipe_reader();
         if (stdout_fd >= 0) ::close(stdout_fd);
         if (stderr_fd >= 0) ::close(stderr_fd);
+        if (stdin_fd  >= 0) { ::close(stdin_fd); stdin_fd = -1; }
 
         // If we still own the supervisor, closing the lifecycle pipe makes
         // it SIGKILL the target. Reap to avoid leaving a zombie.
@@ -522,7 +536,73 @@ struct UnixProcessImpl : RunningProcess::Impl {
         return ok;
     }
 
+    auto write_stdin(std::string_view bytes)
+        -> std::expected<void, WriteError> override {
+        std::lock_guard lock(stdin_mutex);
+        if (!stdin_piped)
+            throw ModeError("collab::process: write_stdin requires StdinMode::pipe");
+        if (stdin_closed)
+            throw ModeError("collab::process: write_stdin called after close_stdin");
+        if (bytes.empty()) return {};
+
+        // Block SIGPIPE on this thread for the duration of the write so a
+        // broken pipe surfaces as EPIPE instead of crashing the process.
+        // Drain any already-pending SIGPIPE from the per-thread queue
+        // before restoring the mask so the user's own SIGPIPE disposition
+        // is preserved.
+        sigset_t pipemask, oldmask;
+        sigemptyset(&pipemask);
+        sigaddset(&pipemask, SIGPIPE);
+        pthread_sigmask(SIG_BLOCK, &pipemask, &oldmask);
+
+        const char* p = bytes.data();
+        size_t left = bytes.size();
+        std::expected<void, WriteError> result{};
+
+        while (left > 0) {
+            ssize_t n = ::write(stdin_fd, p, left);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                int err = errno;
+                if (err == EPIPE) {
+                    struct timespec zero{0, 0};
+                    (void)::sigtimedwait(&pipemask, nullptr, &zero);
+                    result = std::unexpected(WriteError{WriteError::broken_pipe, err});
+                } else {
+                    result = std::unexpected(WriteError{WriteError::platform_error, err});
+                }
+                break;
+            }
+            p    += n;
+            left -= static_cast<size_t>(n);
+        }
+
+        pthread_sigmask(SIG_SETMASK, &oldmask, nullptr);
+        return result;
+    }
+
+    void close_stdin() override {
+        std::lock_guard lock(stdin_mutex);
+        if (!stdin_piped)
+            throw ModeError("collab::process: close_stdin requires StdinMode::pipe");
+        if (stdin_closed)
+            throw ModeError("collab::process: close_stdin called twice");
+        if (stdin_fd >= 0) { ::close(stdin_fd); stdin_fd = -1; }
+        stdin_closed = true;
+    }
+
     void release_for_detach() override {
+        // Close the library-side stdin write end first so the detached
+        // child sees EOF on stdin as part of being released. Most daemons
+        // expect that as the "supervisor let go" signal. After detach, the
+        // user no longer has a handle to call write_stdin on (RunningProcess
+        // is &&-consumed), so this is the last moment to close it cleanly.
+        {
+            std::lock_guard lock(stdin_mutex);
+            if (stdin_fd >= 0) { ::close(stdin_fd); stdin_fd = -1; }
+            stdin_closed = true;
+        }
+
         // Tell the supervisor to stop watching and exit *without* touching
         // the target. Sequence matters: write the release byte while the
         // lifecycle pipe is still open, then reap the supervisor, *then*
@@ -570,7 +650,8 @@ auto platform_spawn(SpawnParams params)
 
     int stdin_pipe[2] = {-1, -1};
     bool pipe_stdin = (params.stdin_mode == CommandConfig::StdinMode::content)
-                   || (params.stdin_mode == CommandConfig::StdinMode::file);
+                   || (params.stdin_mode == CommandConfig::StdinMode::file)
+                   || (params.stdin_mode == CommandConfig::StdinMode::pipe);
     if (pipe_stdin && !make_cloexec_pipe(stdin_pipe))
         return std::unexpected(SpawnError{SpawnError::pipe_creation_failed, errno});
 
@@ -792,7 +873,7 @@ auto platform_spawn(SpawnParams params)
         return std::unexpected(SpawnError{SpawnError::platform_error, EIO});
     }
 
-    // Stdin writer thread — same as before.
+    // Stdin writer thread (content/file modes) or retain-on-handle (pipe mode).
     if (stdin_pipe[1] >= 0 && params.stdin_mode == CommandConfig::StdinMode::content) {
         std::thread([content = std::move(params.stdin_content), fd = stdin_pipe[1]] {
             [[maybe_unused]] ssize_t _ = ::write(fd, content.data(), content.size());
@@ -811,6 +892,9 @@ auto platform_spawn(SpawnParams params)
             }
             ::close(fd);
         }).detach();
+    } else if (stdin_pipe[1] >= 0 && params.stdin_mode == CommandConfig::StdinMode::pipe) {
+        impl->stdin_fd     = stdin_pipe[1];
+        impl->stdin_piped  = true;
     } else if (stdin_pipe[1] >= 0) {
         ::close(stdin_pipe[1]);
     }

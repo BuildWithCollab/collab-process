@@ -23,6 +23,26 @@
 //                                    observe the PID without needing live
 //                                    pipe reading, which the current impl
 //                                    only does during wait().
+//   test_helper stdin_echo           Read lines, write "echo: <line>\n"
+//                                    flushed after every line, until EOF.
+//                                    For round-trip / interleaved tests.
+//   test_helper stdin_count          Read all stdin to EOF, write
+//                                    "got <N> bytes\n", exit 0.
+//                                    For close_stdin EOF + integrity tests.
+//   test_helper stdin_count_lines    Read lines to EOF, write
+//                                    "got <N> lines\n", exit 0.
+//   test_helper stdin_passthrough    Read lines, write "<i>:<line>\n"
+//                                    flushed after every line. Sequence
+//                                    number lets tests detect interleaved
+//                                    bytes from concurrent writers.
+//   test_helper stdin_slow_drain <ms_per_chunk>
+//                                    Read 4KB chunks, sleep <ms> between,
+//                                    write "got <N> bytes\n" at EOF. For
+//                                    backpressure tests.
+//   test_helper stdin_echo_with_stderr
+//                                    Per line, write "echo: <line>\n" to
+//                                    stdout AND "err: <line>\n" to stderr,
+//                                    both flushed.
 
 #include <chrono>
 #include <cstdio>
@@ -35,6 +55,8 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #else
 #include <csignal>
 #include <sys/wait.h>
@@ -232,6 +254,80 @@ int main(int argc, char* argv[]) {
     if (mode == "spawn_child" && argc >= 3) {
         const char* pid_file = argc >= 4 ? argv[3] : nullptr;
         return spawn_grandchild(argv[0], std::atoi(argv[2]), pid_file);
+    }
+
+    if (mode == "stdin_echo") {
+        std::string line;
+        while (std::getline(std::cin, line))
+            std::cout << "echo: " << line << "\n" << std::flush;
+        return 0;
+    }
+
+    if (mode == "stdin_count") {
+        // Binary-safe byte counter; reads in chunks until EOF. Without
+        // binary mode on Windows, \r\n→\n translation would distort byte
+        // counts when tests write CRLF or arbitrary binary data.
+#ifdef _WIN32
+        _setmode(_fileno(stdin), _O_BINARY);
+#endif
+        std::size_t total = 0;
+        char buf[4096];
+        while (std::cin.read(buf, sizeof(buf)) || std::cin.gcount() > 0) {
+            total += static_cast<std::size_t>(std::cin.gcount());
+            if (std::cin.eof()) break;
+        }
+        std::cout << "got " << total << " bytes\n" << std::flush;
+        return 0;
+    }
+
+    if (mode == "stdin_count_lines") {
+        std::string line;
+        std::size_t lines = 0;
+        while (std::getline(std::cin, line))
+            ++lines;
+        std::cout << "got " << lines << " lines\n" << std::flush;
+        return 0;
+    }
+
+    if (mode == "stdin_passthrough") {
+        std::string line;
+        std::size_t i = 0;
+        while (std::getline(std::cin, line))
+            std::cout << i++ << ":" << line << "\n" << std::flush;
+        return 0;
+    }
+
+    if (mode == "stdin_slow_drain" && argc >= 3) {
+        int ms = std::atoi(argv[2]);
+        // Read in 4KB chunks with a sleep between each — used by tests to
+        // verify the parent's write_stdin blocks correctly when the kernel
+        // pipe buffer fills up.
+#ifdef _WIN32
+        // Windows console mode would line-buffer stdin; binary mode avoids
+        // CRLF translation that breaks byte counts.
+        _setmode(_fileno(stdin), _O_BINARY);
+#endif
+        std::size_t total = 0;
+        char buf[4096];
+        for (;;) {
+            std::cin.read(buf, sizeof(buf));
+            std::streamsize n = std::cin.gcount();
+            if (n <= 0) break;
+            total += static_cast<std::size_t>(n);
+            std::this_thread::sleep_for(std::chrono::milliseconds{ms});
+            if (std::cin.eof()) break;
+        }
+        std::cout << "got " << total << " bytes\n" << std::flush;
+        return 0;
+    }
+
+    if (mode == "stdin_echo_with_stderr") {
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            std::cout << "echo: " << line << "\n" << std::flush;
+            std::cerr << "err: "  << line << "\n" << std::flush;
+        }
+        return 0;
     }
 
     std::cerr << "unknown mode: " << mode << std::endl;

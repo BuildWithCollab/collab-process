@@ -4,6 +4,7 @@
 #include <expected>
 #include <memory>
 #include <optional>
+#include <string_view>
 
 #include "collab/process/result.hpp"
 
@@ -55,6 +56,39 @@ public:
 
     // Immediate tree kill. Works in both modes — needed for RAII teardown.
     auto kill() -> bool;
+
+    // ── stdin streaming (StdinMode::pipe only) ───────────────────────────
+    //
+    // Feed bytes to the child's stdin while it runs. Both methods require
+    // the spawn to have used CommandConfig::StdinMode::pipe (or the builder
+    // method Command::stdin_pipe()). Calling them on any other stdin mode,
+    // or after close_stdin() has been called, throws ModeError — these are
+    // contract violations, not transient I/O failures.
+    //
+    // Thread-safe: write_stdin and close_stdin serialize on an internal
+    // mutex. Concurrent writes from multiple threads land contiguously
+    // (no interleaved bytes within a single call). Writing from inside an
+    // on_stdout callback is fully supported and is the headline use case
+    // (e.g. JSON-RPC over stdio, where the parser reacts to a response by
+    // sending the next request).
+    //
+    // Partial-write handling: write_stdin loops internally on short writes
+    // and EINTR — on success, the entire buffer was delivered to the kernel
+    // pipe. Empty string_view is a valid no-op success.
+    //
+    // Errors are runtime I/O failures only:
+    //   broken_pipe    — child closed stdin or has exited.
+    //   platform_error — unexpected EIO / I/O failure.
+    // POSIX SIGPIPE is masked per-thread inside write_stdin so a broken
+    // pipe never crashes the calling process; the user's own SIGPIPE
+    // disposition is preserved.
+    auto write_stdin(std::string_view bytes) -> std::expected<void, WriteError>;
+
+    // Send EOF to the child by closing the write end. Idempotent at the
+    // type level only via ModeError: a second call (or any post-close
+    // call to write_stdin) throws ModeError. detach() and the destructor
+    // close stdin automatically if you haven't already.
+    void close_stdin();
 
     // Release ownership — child survives. Returns PID for reconnection
     // via ProcessRef. Consumes the RunningProcess (&&-qualified).

@@ -31,7 +31,18 @@ struct CommandConfig {
     bool stderr_merge = false;  // merge stderr into stdout stream
 
     // Stdin
-    enum class StdinMode { inherit, content, file, closed };
+    //   inherit — child reads from parent's terminal (default).
+    //   content — library writes stdin_content into a pipe and closes it.
+    //   file    — library streams stdin_path into a pipe and closes it.
+    //   closed  — child sees stdin closed at startup (immediate EOF).
+    //   pipe    — library opens a writable pipe and retains the write end
+    //             on the RunningProcess handle. Use with
+    //             RunningProcess::write_stdin() / close_stdin() to feed
+    //             bytes during the child's lifetime (e.g. JSON-RPC over
+    //             stdio). The library does NOT close stdin automatically;
+    //             call close_stdin() to send EOF, or rely on detach()/
+    //             destruction to close it on the way out.
+    enum class StdinMode { inherit, content, file, closed, pipe };
     StdinMode stdin_mode = StdinMode::inherit;
     std::string stdin_content;           // read when mode == content
     std::filesystem::path stdin_path;    // read when mode == file

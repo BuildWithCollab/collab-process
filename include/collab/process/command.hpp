@@ -100,6 +100,16 @@ public:
         return std::forward<decltype(self)>(self);
     }
 
+    // Open stdin as a writable pipe whose write end is kept on the
+    // RunningProcess handle. After spawn(), feed bytes with
+    // RunningProcess::write_stdin() and signal EOF with close_stdin().
+    auto stdin_pipe(this auto&& self) -> decltype(auto) {
+        self.config_.stdin_mode = CommandConfig::StdinMode::pipe;
+        self.config_.stdin_content.clear();
+        self.config_.stdin_path.clear();
+        return std::forward<decltype(self)>(self);
+    }
+
     // -- Stdout --
 
     auto stdout_capture(this auto&& self) -> decltype(auto) {

@@ -20,4 +20,14 @@ auto SpawnError::what() const -> std::string {
     return fmt::format("unknown error: {}", native_error);
 }
 
+auto WriteError::what() const -> std::string {
+    switch (kind) {
+        case broken_pipe:
+            return fmt::format("broken pipe — child closed stdin or has exited (native error: {})", native_error);
+        case platform_error:
+            return fmt::format("platform error writing to stdin: {}", native_error);
+    }
+    return fmt::format("unknown write error: {}", native_error);
+}
+
 }  // namespace collab::process

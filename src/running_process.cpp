@@ -29,6 +29,13 @@ auto RunningProcess::terminate() -> bool { return impl_->terminate(); }
 auto RunningProcess::interrupt() -> bool { return impl_->interrupt(); }
 auto RunningProcess::kill() -> bool { return impl_->kill(); }
 
+auto RunningProcess::write_stdin(std::string_view bytes)
+    -> std::expected<void, WriteError> {
+    return impl_->write_stdin(bytes);
+}
+
+void RunningProcess::close_stdin() { impl_->close_stdin(); }
+
 auto RunningProcess::detach(this RunningProcess&& self) -> int {
     int pid = self.impl_->pid();
     self.impl_->release_for_detach();  // platform cleanup (e.g., remove kill-on-close job)

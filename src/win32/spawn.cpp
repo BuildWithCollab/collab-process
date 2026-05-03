@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -35,6 +36,17 @@ struct Win32ProcessImpl : RunningProcess::Impl {
     // Pipes for captured output
     HANDLE stdout_read = nullptr;
     HANDLE stderr_read = nullptr;
+
+    // Library-side write end of the child's stdin, retained for the
+    // lifetime of the handle when StdinMode::pipe was selected. Guarded by
+    // stdin_mutex so write_stdin / close_stdin from multiple threads (or
+    // from inside an on_stdout callback racing with the main thread)
+    // serialize cleanly. stdin_piped distinguishes "this handle never had
+    // a writable stdin" from "it had one and we closed it".
+    HANDLE stdin_write_handle = nullptr;
+    bool stdin_piped = false;
+    bool stdin_closed = false;
+    std::mutex stdin_mutex;
 
     // Stdin writer thread — joined before reading pipes or destroying
     std::thread stdin_thread;
@@ -80,6 +92,10 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         join_pipe_readers();
         if (stdout_read) CloseHandle(stdout_read);
         if (stderr_read) CloseHandle(stderr_read);
+        if (stdin_write_handle) {
+            CloseHandle(stdin_write_handle);
+            stdin_write_handle = nullptr;
+        }
         if (process_handle) CloseHandle(process_handle);
         if (job_handle) CloseHandle(job_handle);
     }
@@ -267,7 +283,74 @@ struct Win32ProcessImpl : RunningProcess::Impl {
         return TerminateProcess(process_handle, 1) != 0;
     }
 
+    auto write_stdin(std::string_view bytes)
+        -> std::expected<void, WriteError> override {
+        std::lock_guard lock(stdin_mutex);
+        if (!stdin_piped)
+            throw ModeError("collab::process: write_stdin requires StdinMode::pipe");
+        if (stdin_closed)
+            throw ModeError("collab::process: write_stdin called after close_stdin");
+        if (bytes.empty()) return {};
+
+        const char* p = bytes.data();
+        size_t left = bytes.size();
+        while (left > 0) {
+            // WriteFile on a synchronous anonymous pipe blocks until either
+            // every byte is delivered or the pipe breaks. A short return is
+            // theoretically possible (e.g. the child closed the read end
+            // mid-call); loop defensively.
+            DWORD chunk = static_cast<DWORD>(std::min<size_t>(left, 0x7fffffff));
+            DWORD written = 0;
+            BOOL ok = WriteFile(stdin_write_handle, p, chunk, &written, nullptr);
+            if (!ok) {
+                DWORD err = GetLastError();
+                if (err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA)
+                    return std::unexpected(
+                        WriteError{WriteError::broken_pipe, static_cast<int>(err)});
+                return std::unexpected(
+                    WriteError{WriteError::platform_error, static_cast<int>(err)});
+            }
+            if (written == 0) {
+                // Defensive: WriteFile reporting success with 0 bytes on
+                // a blocking pipe is unexpected. Treat as broken to avoid
+                // an infinite loop.
+                return std::unexpected(
+                    WriteError{WriteError::broken_pipe, static_cast<int>(ERROR_BROKEN_PIPE)});
+            }
+            p    += written;
+            left -= written;
+        }
+        return {};
+    }
+
+    void close_stdin() override {
+        std::lock_guard lock(stdin_mutex);
+        if (!stdin_piped)
+            throw ModeError("collab::process: close_stdin requires StdinMode::pipe");
+        if (stdin_closed)
+            throw ModeError("collab::process: close_stdin called twice");
+        if (stdin_write_handle) {
+            CloseHandle(stdin_write_handle);
+            stdin_write_handle = nullptr;
+        }
+        stdin_closed = true;
+    }
+
     void release_for_detach() override {
+        // Close the library-side stdin write end first so the detached
+        // child sees EOF on stdin as part of being released. After detach
+        // the user no longer has a handle to call write_stdin on
+        // (RunningProcess is &&-consumed), so this is the last moment to
+        // close cleanly.
+        {
+            std::lock_guard lock(stdin_mutex);
+            if (stdin_write_handle) {
+                CloseHandle(stdin_write_handle);
+                stdin_write_handle = nullptr;
+            }
+            stdin_closed = true;
+        }
+
         // Remove the kill-on-close flag so closing the job handle
         // doesn't kill the child process.
         if (job_handle) {
@@ -377,7 +460,8 @@ auto platform_spawn(SpawnParams params)
     // Stdin pipe
     HANDLE stdin_read = nullptr, stdin_write = nullptr;
     bool pipe_stdin = (params.stdin_mode == CommandConfig::StdinMode::content)
-                   || (params.stdin_mode == CommandConfig::StdinMode::file);
+                   || (params.stdin_mode == CommandConfig::StdinMode::file)
+                   || (params.stdin_mode == CommandConfig::StdinMode::pipe);
 
     if (pipe_stdin) {
         if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0))
@@ -611,6 +695,11 @@ auto platform_spawn(SpawnParams params)
                 }
                 CloseHandle(h);
             });
+    } else if (stdin_write && params.stdin_mode == CommandConfig::StdinMode::pipe) {
+        // Retain the write handle on the impl for live writes via
+        // RunningProcess::write_stdin.
+        impl->stdin_write_handle = stdin_write;
+        impl->stdin_piped        = true;
     } else if (stdin_write) {
         CloseHandle(stdin_write);
     }
