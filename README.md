@@ -16,6 +16,7 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
   - [Capture and stream output](#capture-and-stream-output)
   - [Handle spawn errors](#handle-spawn-errors)
   - [Send input to a command](#send-input-to-a-command)
+  - [Talk to a long-running child over stdio](#talk-to-a-long-running-child-over-stdio)
   - [Run with a timeout](#run-with-a-timeout)
   - [Set environment and working directory](#set-environment-and-working-directory)
   - [Load environment from .env files](#load-environment-from-env-files)
@@ -37,6 +38,7 @@ A C++23 process library. Spawn processes, capture output, manage lifecycles.
 - 🎛️ **Fluent builder + plain struct** — choose by call site, same engine underneath
 - 🛡️ **Cross-platform lifecycle parity** — non-detached children die with the parent on Windows, Linux, and macOS. No orphans.
 - 📡 **Live streaming** — get stdout/stderr via callbacks as the child writes, no polling
+- 📨 **Live stdin** — push bytes into a running child with `write_stdin()`; thread-safe, ideal for JSON-RPC and other bidirectional stdio protocols
 - 🎭 **Explicit signal ownership** — `interactive` (terminal drives Ctrl+C) vs `headless` (your code drives `terminate()` / `kill()`)
 - 🧬 **Dotenv built in** — `.env`, `.env.yaml`, `.env.json`, hierarchical discovery, `${VAR}` expansion
 
@@ -289,7 +291,35 @@ Other stdin sources:
 .stdin_file("/path/to/input.txt")  // pipe a file
 .stdin_close()                      // close stdin immediately (EOF)
 .stdin_inherit()                    // child reads from parent's terminal (default)
+.stdin_pipe()                       // live writable pipe — see next recipe
 ```
+
+### Talk to a long-running child over stdio
+
+For long-lived bidirectional protocols — JSON-RPC over stdin/stdout, REPLs, agents that interleave requests and notifications — one-shot stdin isn't enough. Configure stdin as a writable pipe and feed bytes during the child's lifetime:
+
+```cpp
+auto proc = Command("agent").args({"acp"})
+    .stdin_pipe()
+    .stdout_capture()
+    .stdout_callback([&](std::string_view chunk) {
+        // parse incoming NDJSON, dispatch responses…
+    })
+    .spawn();
+
+if (!proc) return;
+
+proc->write_stdin(R"({"jsonrpc":"2.0","id":1,"method":"initialize"})" "\n");
+// …later, possibly from inside the stdout callback…
+proc->write_stdin(R"({"jsonrpc":"2.0","id":2,"method":"session/prompt"})" "\n");
+
+proc->close_stdin();   // sends EOF; many agents take it as "shut down cleanly"
+auto result = proc->wait();
+```
+
+`write_stdin` is thread-safe — concurrent calls serialize, so writing from inside an `on_stdout` callback (the JSON-RPC pattern: react to a response by sending the next request) is fully supported. Partial writes loop internally; broken-pipe errors after the child exits surface as `WriteError{broken_pipe}` rather than crashing the process via `SIGPIPE` on POSIX.
+
+Calling `write_stdin` or `close_stdin` on a handle that wasn't spawned with `stdin_pipe()`, or after `close_stdin` has already been called, throws `ModeError` — matches the `terminate()` / `interrupt()` precedent. `detach()` and the destructor close stdin automatically.
 
 ### Run with a timeout
 
@@ -472,10 +502,11 @@ if (ref.is_alive())
 | `CommandConfig` | Plain-data process config (copyable, storable) |
 | `IoCallbacks` | Move-only stdout/stderr stream callbacks |
 | `Result` | Captured output + exit code from `run()` / `wait()` |
-| `RunningProcess` | RAII handle from `spawn()` — pid, wait, kill, detach |
+| `RunningProcess` | RAII handle from `spawn()` — pid, wait, kill, detach, write_stdin, close_stdin |
 | `ProcessRef` | PID-based reconnect handle (best effort) |
 | `SpawnError` | Spawn-time failure kind + native errno |
-| `ModeError` | Thrown by `terminate()` / `interrupt()` on interactive handles |
+| `WriteError` | Runtime failure from `write_stdin()` (broken_pipe / platform_error) |
+| `ModeError` | Thrown by `terminate()` / `interrupt()` on interactive handles, or by `write_stdin()` / `close_stdin()` on a non-`stdin_pipe()` handle |
 
 Free functions: `run()`, `spawn()`, `spawn_detached()`, `find_executable()`, `is_pe_executable()`.
 
