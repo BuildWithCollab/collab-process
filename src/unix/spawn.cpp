@@ -565,8 +565,15 @@ struct UnixProcessImpl : RunningProcess::Impl {
                 if (errno == EINTR) continue;
                 int err = errno;
                 if (err == EPIPE) {
-                    struct timespec zero{0, 0};
-                    (void)::sigtimedwait(&pipemask, nullptr, &zero);
+                    // Drain the pending SIGPIPE we blocked above.
+                    // sigtimedwait is not available on macOS, so use
+                    // sigpending + sigwait which are POSIX-portable.
+                    sigset_t pending;
+                    sigpending(&pending);
+                    if (sigismember(&pending, SIGPIPE)) {
+                        int dummy;
+                        sigwait(&pipemask, &dummy);
+                    }
                     result = std::unexpected(WriteError{WriteError::broken_pipe, err});
                 } else {
                     result = std::unexpected(WriteError{WriteError::platform_error, err});
