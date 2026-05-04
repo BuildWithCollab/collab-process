@@ -43,6 +43,13 @@
 //                                    Per line, write "echo: <line>\n" to
 //                                    stdout AND "err: <line>\n" to stderr,
 //                                    both flushed.
+//   test_helper console_status       Windows: print "console=yes" if
+//                                    GetConsoleWindow() returns non-null,
+//                                    "console=no" otherwise. Used to verify
+//                                    CREATE_NO_WINDOW is applied for
+//                                    headless children of console-less
+//                                    parents (e.g. GUI hosts). Non-Windows
+//                                    builds print "console=na".
 
 #include <chrono>
 #include <cstdio>
@@ -327,6 +334,16 @@ int main(int argc, char* argv[]) {
             std::cout << "echo: " << line << "\n" << std::flush;
             std::cerr << "err: "  << line << "\n" << std::flush;
         }
+        return 0;
+    }
+
+    if (mode == "console_status") {
+#ifdef _WIN32
+        std::cout << (GetConsoleWindow() ? "console=yes" : "console=no")
+                  << std::flush;
+#else
+        std::cout << "console=na" << std::flush;
+#endif
         return 0;
     }
 

@@ -558,10 +558,23 @@ auto platform_spawn(SpawnParams params)
     DWORD flags = EXTENDED_STARTUPINFO_PRESENT;
     // CREATE_NO_WINDOW hides the child's console window — but it also
     // effectively detaches the child's console enough that a parent
-    // GenerateConsoleCtrlEvent cannot reach it. Headless children need
-    // that console reachability to receive CTRL_BREAK later, so keep the
-    // shared console in that case.
-    if (!is_interactive && !params.headless)
+    // GenerateConsoleCtrlEvent cannot reach it. Headless children
+    // normally rely on a console shared with the parent for CTRL_BREAK
+    // delivery, so we keep the shared console in that case. But when
+    // the parent has no console at all (GUI host, detached worker),
+    // there is no shared console to preserve — applying the flag
+    // costs nothing and prevents Windows from allocating a stray
+    // console window for every spawn.
+    //
+    // Detection note: GetConsoleWindow() is too aggressive — it returns
+    // null for any console-subsystem process whose console window is
+    // hidden / not visible (e.g. the test suite under `xmake run`),
+    // even though the process is still attached to a console and
+    // CTRL_BREAK delivery works fine. GetConsoleCP() returns 0 *only*
+    // when no console is attached at all, which is the GUI-host case
+    // we want to detect.
+    bool parent_has_console = (GetConsoleCP() != 0);
+    if (!is_interactive && (!params.headless || !parent_has_console))
         flags |= CREATE_NO_WINDOW;
     if (params.headless)
         flags |= CREATE_NEW_PROCESS_GROUP;

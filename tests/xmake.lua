@@ -11,11 +11,20 @@ target("lifecycle_harness")
     add_deps("collab-process", "test_helper")
     add_files("lifecycle_harness.cpp")
 
+-- No-console harness — Windows-only. Detaches its console with
+-- FreeConsole(), then spawns test_helper headless via collab-process to
+-- verify the library applies CREATE_NO_WINDOW for headless children of
+-- console-less parents (regression test for the GUI-host popup-window bug).
+target("no_console_harness")
+    set_kind("binary")
+    add_deps("collab-process", "test_helper")
+    add_files("no_console_harness.cpp")
+
 -- Main test binary
 target("collab-process-tests")
     set_kind("binary")
     set_rundir("$(projectdir)")
-    add_deps("collab-process", "test_helper", "lifecycle_harness")
+    add_deps("collab-process", "test_helper", "lifecycle_harness", "no_console_harness")
     add_packages("catch2")
     add_files(
         "test_run.cpp",

@@ -278,6 +278,30 @@ TEST_CASE("signals: Unix headless + interrupt() delivers SIGINT → child exits 
 #endif
 
 #ifdef _WIN32
+// Regression: a console-less parent (Qt GUI app, detached worker) used to
+// get a stray console window allocated by Windows for every headless
+// child, because CREATE_NO_WINDOW was unconditionally skipped in the
+// headless branch. The harness simulates a GUI host by FreeConsole()-ing
+// itself before spawning test_helper headless; with the fix, the library
+// detects the absent parent console and applies CREATE_NO_WINDOW.
+TEST_CASE("signals: Windows headless from console-less parent does not allocate a console",
+          "[signals][windows][headless][no_console]") {
+    auto dir = fs::path(TEST_BUILD_DIR);
+    auto harness = (dir / "no_console_harness.exe").string();
+    auto helper  = (dir / "test_helper.exe").string();
+
+    auto result = Command(harness)
+        .args({helper})
+        .stdout_capture()
+        .stderr_capture()
+        .run();
+
+    REQUIRE(result.has_value());
+    INFO("harness stderr: " << result->stderr_content);
+    REQUIRE(result->ok());
+    CHECK(result->stdout_content == "console=no");
+}
+
 TEST_CASE("signals: Windows headless + interrupt() returns false (no platform mapping)",
           "[signals][windows][headless][interrupt]") {
     auto proc = Command(helper_path())
